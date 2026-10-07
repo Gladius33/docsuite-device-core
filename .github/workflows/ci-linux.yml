@@ -71,6 +71,44 @@ jobs:
           kill "$SERVER_PID"
           trap - EXIT
 
+      - name: Local service integration test
+        run: |
+          export XDG_RUNTIME_DIR="$PWD/build/runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          ./build/services/device-service/docsuite-device-service &
+          SERVICE_PID=$!
+          trap 'kill "$SERVICE_PID" 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json
+          import os
+          import socket
+          import time
+
+          path = os.path.join(os.environ['XDG_RUNTIME_DIR'], 'docsuite-device-core.sock')
+          deadline = time.time() + 5
+          while not os.path.exists(path) and time.time() < deadline:
+              time.sleep(0.05)
+          assert os.path.exists(path), path
+
+          with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+              client.connect(path)
+              client.sendall(b'{"id":1,"method":"ping","params":{}}\n')
+              data = b''
+              while b'\n' not in data:
+                  chunk = client.recv(4096)
+                  assert chunk
+                  data += chunk
+          response = json.loads(data.split(b'\n', 1)[0])
+          assert response['id'] == 1
+          assert response['ok'] is True
+          assert response['result']['service'] == 'docsuite-device-service'
+          assert response['result']['version'] == '0.5.0'
+          print('DocSuite Unix socket service: OK')
+          PY
+          kill "$SERVICE_PID"
+          trap - EXIT
+
       - name: Build Debian package
         if: matrix.build_type == 'Release'
         run: cmake --build build --target package
