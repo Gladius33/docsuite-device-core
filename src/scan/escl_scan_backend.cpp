@@ -9,15 +9,16 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
-#include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -46,8 +47,25 @@ public:
             httpClose(connection_);
         }
     }
+
     HttpGuard(const HttpGuard&) = delete;
     HttpGuard& operator=(const HttpGuard&) = delete;
+
+    HttpGuard(HttpGuard&& other) noexcept : connection_{other.connection_} {
+        other.connection_ = nullptr;
+    }
+
+    HttpGuard& operator=(HttpGuard&& other) noexcept {
+        if (this != &other) {
+            if (connection_ != nullptr) {
+                httpClose(connection_);
+            }
+            connection_ = other.connection_;
+            other.connection_ = nullptr;
+        }
+        return *this;
+    }
+
     [[nodiscard]] http_t* get() const noexcept { return connection_; }
 
 private:
@@ -55,10 +73,12 @@ private:
 };
 
 [[nodiscard]] std::string trim(std::string value) {
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    while (!value.empty() &&
+           std::isspace(static_cast<unsigned char>(value.front())) != 0) {
         value.erase(value.begin());
     }
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+    while (!value.empty() &&
+           std::isspace(static_cast<unsigned char>(value.back())) != 0) {
         value.pop_back();
     }
     return value;
@@ -92,13 +112,18 @@ private:
         &port,
         resource.data(), static_cast<int>(resource.size()));
 
-    if (status != HTTP_URI_STATUS_OK || host.front() == '\0') {
+    const bool acceptable_status =
+        status == HTTP_URI_STATUS_OK ||
+        status == HTTP_URI_STATUS_MISSING_RESOURCE;
+    if (!acceptable_status || host.front() == '\0') {
         return false;
     }
 
     parsed.scheme = lower_copy(scheme.data());
     parsed.host = host.data();
-    parsed.port = port > 0 ? port : (parsed.scheme == "https" || parsed.scheme == "ipps" ? 443 : 80);
+    parsed.port = port > 0
+        ? port
+        : (parsed.scheme == "https" || parsed.scheme == "ipps" ? 443 : 80);
     parsed.resource = resource.front() != '\0' ? resource.data() : "/";
     return true;
 }
@@ -110,7 +135,10 @@ private:
     return parse_http_uri(uri, parsed);
 }
 
-[[nodiscard]] bool parse_scanner_uri(const std::string& scanner_name, ParsedHttpUri& parsed) {
+[[nodiscard]] bool parse_scanner_uri(
+    const std::string& scanner_name,
+    ParsedHttpUri& parsed) {
+
     std::string uri = scanner_name;
     if (uri.rfind("escl:", 0) == 0) {
         uri.erase(0, 5);
@@ -121,13 +149,30 @@ private:
     return parse_http_uri(uri, parsed);
 }
 
+[[nodiscard]] std::string escl_base_resource(const ParsedHttpUri& uri) {
+    std::string base = uri.resource;
+    if (base.empty() || base == "/") {
+        return "/eSCL";
+    }
+    while (base.size() > 1 && base.back() == '/') {
+        base.pop_back();
+    }
+    if (base.size() >= 5 && lower_copy(base.substr(base.size() - 5)) == "/escl") {
+        return base;
+    }
+    return "/eSCL";
+}
+
 [[nodiscard]] http_encryption_t encryption_for(const ParsedHttpUri& uri) {
     return uri.scheme == "https" || uri.scheme == "ipps"
         ? HTTP_ENCRYPTION_ALWAYS
         : HTTP_ENCRYPTION_NEVER;
 }
 
-[[nodiscard]] HttpGuard connect_http(const ParsedHttpUri& uri, const int timeout_ms = 5000) {
+[[nodiscard]] HttpGuard connect_http(
+    const ParsedHttpUri& uri,
+    const int timeout_ms = 5000) {
+
     http_t* connection = httpConnect2(
         uri.host.c_str(),
         uri.port,
@@ -138,7 +183,9 @@ private:
         timeout_ms,
         nullptr);
     if (connection == nullptr) {
-        throw std::runtime_error("Unable to connect to eSCL scanner at " + uri.host);
+        throw std::runtime_error(
+            "Unable to connect to eSCL scanner at " + uri.host + ":" +
+            std::to_string(uri.port));
     }
     httpSetTimeout(connection, 30.0, nullptr, nullptr);
     return HttpGuard{connection};
@@ -150,6 +197,20 @@ private:
         status = httpUpdate(connection);
     }
     return status;
+}
+
+void write_all(http_t* connection, const std::string& payload) {
+    std::size_t offset = 0;
+    while (offset < payload.size()) {
+        const ssize_t written = httpWrite2(
+            connection,
+            payload.data() + offset,
+            payload.size() - offset);
+        if (written <= 0) {
+            throw std::runtime_error("Unable to send complete eSCL request payload");
+        }
+        offset += static_cast<std::size_t>(written);
+    }
 }
 
 [[nodiscard]] std::vector<std::uint8_t> read_body(
@@ -177,21 +238,25 @@ private:
 
 [[nodiscard]] std::string fetch_escl_capabilities(const ParsedHttpUri& uri) {
     HttpGuard connection = connect_http(uri, 3000);
+    const std::string resource = escl_base_resource(uri) + "/ScannerCapabilities";
+
     httpClearFields(connection.get());
-    if (httpGet(connection.get(), "/eSCL/ScannerCapabilities") != 0) {
+    if (httpGet(connection.get(), resource.c_str()) != 0) {
         throw std::runtime_error("Unable to send eSCL ScannerCapabilities request");
     }
     const http_status_t status = response_status(connection.get());
     if (status != HTTP_STATUS_OK) {
         throw std::runtime_error(
-            "eSCL ScannerCapabilities returned HTTP " + std::to_string(static_cast<int>(status)));
+            "eSCL ScannerCapabilities returned HTTP " +
+            std::to_string(static_cast<int>(status)));
     }
 
     constexpr std::size_t max_capabilities_size = 1024U * 1024U;
     const auto bytes = read_body(connection.get(), max_capabilities_size);
     const std::string xml(bytes.begin(), bytes.end());
     if (xml.find("ScannerCapabilities") == std::string::npos) {
-        throw std::runtime_error("eSCL ScannerCapabilities response is not recognized XML");
+        throw std::runtime_error(
+            "eSCL ScannerCapabilities response is not recognized XML");
     }
     return xml;
 }
@@ -235,7 +300,8 @@ private:
             break;
         }
         std::string value = trim(xml.substr(content_begin, end - content_begin));
-        if (!value.empty() && std::find(result.begin(), result.end(), value) == result.end()) {
+        if (!value.empty() &&
+            std::find(result.begin(), result.end(), value) == result.end()) {
             result.push_back(std::move(value));
         }
         cursor = end + close.size();
@@ -264,36 +330,59 @@ private:
     return result;
 }
 
-[[nodiscard]] double max_dimension_mm(
+[[nodiscard]] int max_dimension_units(
     const std::string& xml,
     const std::initializer_list<std::string_view> tags) {
-    const int units = positive_int(xml_value(xml, tags));
+
+    return positive_int(xml_value(xml, tags));
+}
+
+[[nodiscard]] double units300_to_mm(const int units) {
     return units > 0 ? static_cast<double>(units) * 25.4 / 300.0 : 0.0;
 }
 
-[[nodiscard]] std::string eSCL_color_mode(const std::string& requested) {
+[[nodiscard]] std::string escl_color_mode(const std::string& requested) {
     const std::string lower = lower_copy(requested);
-    if (lower.find("gray") != std::string::npos || lower.find("grey") != std::string::npos ||
+    if (lower == "blackandwhite1" || lower == "bw" ||
+        lower.find("lineart") != std::string::npos) {
+        return "BlackAndWhite1";
+    }
+    if (lower.find("gray") != std::string::npos ||
+        lower.find("grey") != std::string::npos ||
         lower.find("mono") != std::string::npos) {
         return "Grayscale8";
-    }
-    if (lower == "blackandwhite1" || lower == "bw") {
-        return "BlackAndWhite1";
     }
     return "RGB24";
 }
 
-[[nodiscard]] std::string eSCL_input_source(const std::string& requested) {
+[[nodiscard]] std::string escl_input_source(const std::string& requested) {
     const std::string lower = lower_copy(requested);
-    if (lower.find("adf") != std::string::npos || lower.find("feeder") != std::string::npos) {
+    if (lower.find("adf") != std::string::npos ||
+        lower.find("feeder") != std::string::npos) {
         return "Feeder";
     }
     return "Platen";
 }
 
-[[nodiscard]] std::string scan_settings_xml(const ScanSettings& settings) {
-    const std::string color = eSCL_color_mode(settings.mode);
-    const std::string source = eSCL_input_source(settings.source);
+[[nodiscard]] std::string scan_settings_xml(
+    const ScanSettings& settings,
+    const int max_width_units,
+    const int max_height_units) {
+
+    const std::string color = escl_color_mode(settings.mode);
+    const std::string source = escl_input_source(settings.source);
+
+    std::string region;
+    if (max_width_units > 0 && max_height_units > 0) {
+        region =
+            "<scan:ScanRegions><scan:ScanRegion>"
+            "<pwg:Height>" + std::to_string(max_height_units) + "</pwg:Height>"
+            "<pwg:Width>" + std::to_string(max_width_units) + "</pwg:Width>"
+            "<pwg:XOffset>0</pwg:XOffset>"
+            "<pwg:YOffset>0</pwg:YOffset>"
+            "</scan:ScanRegion></scan:ScanRegions>";
+    }
+
     return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         "<scan:ScanSettings xmlns:scan=\"http://schemas.hp.com/imaging/escl/2011/05/03\" "
         "xmlns:pwg=\"http://www.pwg.org/schemas/2010/12/sm\">"
@@ -304,7 +393,8 @@ private:
         "<pwg:InputSource>" + source + "</pwg:InputSource>"
         "<scan:ColorMode>" + color + "</scan:ColorMode>"
         "<scan:XResolution>" + std::to_string(settings.dpi) + "</scan:XResolution>"
-        "<scan:YResolution>" + std::to_string(settings.dpi) + "</scan:YResolution>"
+        "<scan:YResolution>" + std::to_string(settings.dpi) + "</scan:YResolution>" +
+        region +
         "</scan:ScanSettings>";
 }
 
@@ -319,6 +409,41 @@ private:
     return parse_http_uri(location, parsed) ? parsed.resource : std::string{};
 }
 
+[[nodiscard]] std::vector<std::uint8_t> fetch_next_document(
+    const ParsedHttpUri& uri,
+    const std::string& resource) {
+
+    constexpr int max_attempts = 12;
+    constexpr auto retry_delay = std::chrono::milliseconds{350};
+    constexpr std::size_t max_document_size = 256U * 1024U * 1024U;
+
+    for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+        HttpGuard connection = connect_http(uri, 5000);
+        httpClearFields(connection.get());
+        if (httpGet(connection.get(), resource.c_str()) != 0) {
+            throw std::runtime_error("Unable to request eSCL NextDocument");
+        }
+
+        const http_status_t status = response_status(connection.get());
+        if (status == HTTP_STATUS_OK) {
+            return read_body(connection.get(), max_document_size);
+        }
+
+        if (status == HTTP_STATUS_SERVICE_UNAVAILABLE && attempt < max_attempts) {
+            (void)read_body(connection.get(), 64U * 1024U);
+            std::this_thread::sleep_for(retry_delay);
+            continue;
+        }
+
+        throw std::runtime_error(
+            "eSCL NextDocument returned HTTP " +
+            std::to_string(static_cast<int>(status)) +
+            " after attempt " + std::to_string(attempt));
+    }
+
+    throw std::runtime_error("eSCL NextDocument did not become ready in time");
+}
+
 #ifdef DOCSUITE_HAVE_OPENCV
 [[nodiscard]] ScanFrame decode_jpeg(
     const std::vector<std::uint8_t>& encoded,
@@ -327,6 +452,10 @@ private:
     if (encoded.empty()) {
         throw std::runtime_error("eSCL returned an empty document");
     }
+    if (encoded.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("eSCL JPEG document is too large to decode safely");
+    }
+
     cv::Mat compressed(
         1,
         static_cast<int>(encoded.size()),
@@ -421,7 +550,7 @@ std::vector<ScannerInfo> EsclScanBackend::probe_printers(
         }
 
         scanners.push_back(ScannerInfo{
-            .name = "escl:http://" + scanner_uri.host + ":80",
+            .name = "escl:http://" + scanner_uri.host + ":80/eSCL",
             .vendor = std::move(vendor),
             .model = std::move(model),
             .type = std::move(type),
@@ -440,7 +569,9 @@ bool EsclScanBackend::acquisition_available() const noexcept {
 #endif
 }
 
-ScannerCapabilities EsclScanBackend::capabilities(const std::string& scanner_name) const {
+ScannerCapabilities EsclScanBackend::capabilities(
+    const std::string& scanner_name) const {
+
     ParsedHttpUri uri;
     if (!parse_scanner_uri(scanner_name, uri)) {
         throw std::runtime_error("Unsupported eSCL scanner URI: " + scanner_name);
@@ -454,33 +585,44 @@ ScannerCapabilities EsclScanBackend::capabilities(const std::string& scanner_nam
     const auto raw_modes = xml_values(xml, "scan:ColorMode");
     for (const auto& mode : raw_modes) {
         if (mode == "RGB24") {
-            if (std::find(result.modes.begin(), result.modes.end(), "Color") == result.modes.end()) {
+            if (std::find(result.modes.begin(), result.modes.end(), "Color") ==
+                result.modes.end()) {
                 result.modes.push_back("Color");
             }
         } else if (mode == "Grayscale8") {
-            if (std::find(result.modes.begin(), result.modes.end(), "Gray") == result.modes.end()) {
+            if (std::find(result.modes.begin(), result.modes.end(), "Gray") ==
+                result.modes.end()) {
                 result.modes.push_back("Gray");
             }
         } else if (mode == "BlackAndWhite1") {
-            if (std::find(result.modes.begin(), result.modes.end(), "Lineart") == result.modes.end()) {
+            if (std::find(result.modes.begin(), result.modes.end(), "Lineart") ==
+                result.modes.end()) {
                 result.modes.push_back("Lineart");
             }
         }
     }
 
     result.resolutions_dpi = resolutions_from_xml(xml);
-    if (xml.find("PlatenInputCaps") != std::string::npos || xml.find("Platen") != std::string::npos) {
+    if (xml.find("PlatenInputCaps") != std::string::npos ||
+        xml.find("Platen") != std::string::npos) {
         result.sources.push_back("Flatbed");
     }
-    if (xml.find("AdfSimplexInputCaps") != std::string::npos || xml.find("ADF") != std::string::npos) {
+    if (xml.find("AdfSimplexInputCaps") != std::string::npos ||
+        xml.find("ADF") != std::string::npos) {
         result.sources.push_back("ADF");
     }
     if (xml.find("AdfDuplexInputCaps") != std::string::npos) {
         result.sources.push_back("ADF Duplex");
     }
 
-    result.max_width_mm = max_dimension_mm(xml, {"pwg:MaxWidth", "scan:MaxWidth", "MaxWidth"});
-    result.max_height_mm = max_dimension_mm(xml, {"pwg:MaxHeight", "scan:MaxHeight", "MaxHeight"});
+    const int width_units = max_dimension_units(
+        xml,
+        {"pwg:MaxWidth", "scan:MaxWidth", "MaxWidth"});
+    const int height_units = max_dimension_units(
+        xml,
+        {"pwg:MaxHeight", "scan:MaxHeight", "MaxHeight"});
+    result.max_width_mm = units300_to_mm(width_units);
+    result.max_height_mm = units300_to_mm(height_units);
     return result;
 }
 
@@ -491,7 +633,8 @@ ScanFrame EsclScanBackend::scan(
 #ifndef DOCSUITE_HAVE_OPENCV
     (void)scanner_name;
     (void)settings;
-    throw std::runtime_error("Direct eSCL acquisition requires an OpenCV-enabled DocSuite build");
+    throw std::runtime_error(
+        "Direct eSCL acquisition requires an OpenCV-enabled DocSuite build");
 #else
     ParsedHttpUri uri;
     if (!parse_scanner_uri(scanner_name, uri)) {
@@ -501,49 +644,51 @@ ScanFrame EsclScanBackend::scan(
         throw std::runtime_error("eSCL scan resolution must be positive");
     }
 
+    const std::string capabilities_xml = fetch_escl_capabilities(uri);
+    const int max_width_units = max_dimension_units(
+        capabilities_xml,
+        {"pwg:MaxWidth", "scan:MaxWidth", "MaxWidth"});
+    const int max_height_units = max_dimension_units(
+        capabilities_xml,
+        {"pwg:MaxHeight", "scan:MaxHeight", "MaxHeight"});
+
     HttpGuard connection = connect_http(uri, 5000);
-    const std::string xml = scan_settings_xml(settings);
+    const std::string xml = scan_settings_xml(
+        settings,
+        max_width_units,
+        max_height_units);
+    const std::string jobs_resource = escl_base_resource(uri) + "/ScanJobs";
 
     httpClearFields(connection.get());
     httpSetField(connection.get(), HTTP_FIELD_CONTENT_TYPE, "text/xml; charset=utf-8");
     httpSetLength(connection.get(), xml.size());
-    if (httpPost(connection.get(), "/eSCL/ScanJobs") != 0) {
+    if (httpPost(connection.get(), jobs_resource.c_str()) != 0) {
         throw std::runtime_error("Unable to send eSCL ScanJobs POST request");
     }
-    const ssize_t written = httpWrite2(connection.get(), xml.data(), xml.size());
-    if (written < 0 || static_cast<std::size_t>(written) != xml.size()) {
-        throw std::runtime_error("Unable to send complete eSCL ScanSettings payload");
-    }
+    write_all(connection.get(), xml);
 
     const http_status_t create_status = response_status(connection.get());
     if (create_status != HTTP_STATUS_CREATED && create_status != HTTP_STATUS_OK) {
         throw std::runtime_error(
-            "eSCL ScanJobs returned HTTP " + std::to_string(static_cast<int>(create_status)));
+            "eSCL ScanJobs returned HTTP " +
+            std::to_string(static_cast<int>(create_status)));
     }
 
-    const char* location_field = httpGetField(connection.get(), HTTP_FIELD_LOCATION);
+    const char* location_field = httpGetField(
+        connection.get(),
+        HTTP_FIELD_LOCATION);
     const std::string location = location_field != nullptr ? location_field : "";
     const std::string job_resource = resource_from_location(location);
     if (job_resource.empty()) {
-        throw std::runtime_error("eSCL ScanJobs response did not provide a usable Location header");
+        throw std::runtime_error(
+            "eSCL ScanJobs response did not provide a usable Location header");
     }
 
-    // Drain any optional response body before reusing the HTTP connection.
+    // Drain any optional response body before closing/reusing the connection.
     (void)read_body(connection.get(), 64U * 1024U);
 
     const std::string document_resource = job_resource + "/NextDocument";
-    httpClearFields(connection.get());
-    if (httpGet(connection.get(), document_resource.c_str()) != 0) {
-        throw std::runtime_error("Unable to request eSCL NextDocument");
-    }
-    const http_status_t document_status = response_status(connection.get());
-    if (document_status != HTTP_STATUS_OK) {
-        throw std::runtime_error(
-            "eSCL NextDocument returned HTTP " + std::to_string(static_cast<int>(document_status)));
-    }
-
-    constexpr std::size_t max_document_size = 256U * 1024U * 1024U;
-    const auto document = read_body(connection.get(), max_document_size);
+    const auto document = fetch_next_document(uri, document_resource);
     return decode_jpeg(document, settings.dpi);
 #endif
 }
