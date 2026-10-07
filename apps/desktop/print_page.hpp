@@ -10,9 +10,11 @@
 #include <memory>
 
 class QComboBox;
+class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QSpinBox;
 class QTableWidget;
 
 namespace docsuite::desktop {
@@ -25,6 +27,8 @@ public:
 
 private:
     void browse_file();
+    void refresh_capabilities(bool force_refresh = false);
+    void apply_preset();
     void submit(bool diagnostic);
     void cancel_selected();
     [[nodiscard]] PrintProfile selected_profile() const;
@@ -32,8 +36,17 @@ private:
     std::shared_ptr<DeviceManager> manager_;
     QComboBox* printer_{nullptr};
     QLineEdit* file_{nullptr};
-    QComboBox* profile_{nullptr};
+    QComboBox* preset_{nullptr};
+    QComboBox* color_{nullptr};
+    QComboBox* sides_{nullptr};
+    QComboBox* quality_{nullptr};
+    QComboBox* media_{nullptr};
+    QComboBox* source_{nullptr};
+    QComboBox* media_type_{nullptr};
+    QSpinBox* copies_{nullptr};
+    QLabel* capabilities_status_{nullptr};
     QPushButton* refresh_printers_{nullptr};
+    QPushButton* refresh_capabilities_{nullptr};
     QPushButton* print_{nullptr};
     QPushButton* diagnose_{nullptr};
     QPushButton* refresh_jobs_{nullptr};
