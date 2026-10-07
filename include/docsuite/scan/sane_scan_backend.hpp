@@ -14,6 +14,8 @@ class SaneScanBackend {
 public:
     [[nodiscard]] std::vector<ScannerInfo> list_scanners(bool include_virtual = false) const;
 
+    [[nodiscard]] ScannerCapabilities capabilities(const std::string& scanner_name) const;
+
     [[nodiscard]] ScanFrame scan(
         const std::string& scanner_name,
         const ScanSettings& settings = {}) const;
