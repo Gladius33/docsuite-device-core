@@ -18,6 +18,7 @@ void print_usage() {
         << "docsuite-device-cli status <printer>\n"
         << "docsuite-device-cli jobs <printer> [active]\n"
         << "docsuite-device-cli cancel <printer> <job-id>\n"
+        << "docsuite-device-cli preflight <printer> [color|mono]\n"
         << "docsuite-device-cli print <printer> <file> [color|mono]\n"
         << "docsuite-device-cli diagnose-print <printer> <file> [color|mono]\n"
         << "docsuite-device-cli scan <scanner> <output.pnm> [dpi] [color|gray]\n";
@@ -191,10 +192,24 @@ int main(int argc, char** argv) {
             return canceled ? 0 : 1;
         }
 
+        if (command == "preflight") {
+            if (argc < 3) { print_usage(); return 2; }
+            const auto profile = profile_from_arg(argc, argv, 3);
+            const auto result = manager.print_backend().preflight(argv[2], profile, false);
+            std::cout << "Preflight: " << (result.ok ? "OK" : "FAIL") << '\n';
+            for (const auto& warning : result.warnings) {
+                std::cout << "  warning: " << warning << '\n';
+            }
+            for (const auto& error : result.errors) {
+                std::cout << "  error: " << error << '\n';
+            }
+            return result.ok ? 0 : 1;
+        }
+
         if (command == "print") {
             if (argc < 4) { print_usage(); return 2; }
             const auto profile = profile_from_arg(argc, argv, 4);
-            const int job_id = manager.print_backend().print_file(
+            const int job_id = manager.print_backend().print_file_advanced(
                 argv[2], argv[3], "DocSuite print job", profile);
             std::cout << "Submitted CUPS job " << job_id << '\n';
             return 0;
