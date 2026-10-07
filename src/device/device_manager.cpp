@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace docsuite {
@@ -21,6 +24,27 @@ namespace {
         }
     }
     return result;
+}
+
+[[nodiscard]] std::string model_token_with_digit(const std::string& value) {
+    std::string token;
+    for (std::size_t i = 0; i <= value.size(); ++i) {
+        const unsigned char ch = i < value.size()
+            ? static_cast<unsigned char>(value[i])
+            : static_cast<unsigned char>(' ');
+        if (std::isalnum(ch) != 0) {
+            token.push_back(static_cast<char>(std::tolower(ch)));
+            continue;
+        }
+        if (token.size() >= 4U &&
+            std::any_of(token.begin(), token.end(), [](const unsigned char candidate) {
+                return std::isdigit(candidate) != 0;
+            })) {
+            return token;
+        }
+        token.clear();
+    }
+    return {};
 }
 
 [[nodiscard]] std::string ipv4_key(const ScannerInfo& scanner) {
@@ -66,6 +90,12 @@ namespace {
         return true;
     }
 
+    const std::string left_token = model_token_with_digit(left.model + " " + left.name);
+    const std::string right_token = model_token_with_digit(right.model + " " + right.name);
+    if (!left_token.empty() && left_token == right_token) {
+        return true;
+    }
+
     const std::string left_model = normalized_model(left.model);
     const std::string right_model = normalized_model(right.model);
     if (left_model.size() < 5U || right_model.size() < 5U) {
@@ -86,6 +116,43 @@ void append_unique_scanner(std::vector<ScannerInfo>& scanners, ScannerInfo candi
     if (!duplicate) {
         scanners.push_back(std::move(candidate));
     }
+}
+
+[[nodiscard]] bool direct_escl_name(const std::string& scanner) {
+    return scanner.rfind("escl:http://", 0) == 0 || scanner.rfind("escl:https://", 0) == 0;
+}
+
+[[nodiscard]] std::optional<ScannerInfo> matching_direct_escl(
+    const std::string& requested,
+    const SaneScanBackend& sane,
+    const EsclScanBackend& escl,
+    const CupsPrintBackend& print) {
+
+    ScannerInfo requested_info{
+        .name = requested,
+        .vendor = {},
+        .model = requested,
+        .type = {},
+        .backend = "requested",
+    };
+
+    try {
+        for (const auto& candidate : sane.list_scanners()) {
+            if (candidate.name == requested) {
+                requested_info = candidate;
+                break;
+            }
+        }
+    } catch (...) {
+        // A stale SANE discovery must not prevent a direct eSCL fallback attempt.
+    }
+
+    for (const auto& candidate : escl.probe_printers(print.list_printers())) {
+        if (same_scanner(requested_info, candidate)) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace
@@ -109,6 +176,66 @@ DeviceSnapshot DeviceManager::snapshot() const {
         .printers = std::move(printers),
         .scanners = std::move(scanners),
     };
+}
+
+ScannerCapabilities DeviceManager::scanner_capabilities(const std::string& scanner) const {
+    if (direct_escl_name(scanner)) {
+        return escl_backend_.capabilities(scanner);
+    }
+
+    try {
+        return scan_backend_.capabilities(scanner);
+    } catch (const std::exception& sane_error) {
+        const auto direct = matching_direct_escl(
+            scanner,
+            scan_backend_,
+            escl_backend_,
+            print_backend_);
+        if (!direct.has_value()) {
+            throw;
+        }
+        try {
+            return escl_backend_.capabilities(direct->name);
+        } catch (const std::exception& escl_error) {
+            throw std::runtime_error(
+                std::string{"SANE capabilities failed: "} + sane_error.what() +
+                "; direct eSCL fallback failed: " + escl_error.what());
+        }
+    }
+}
+
+ScanFrame DeviceManager::scan(
+    const std::string& scanner,
+    const ScanSettings& settings) const {
+
+    if (direct_escl_name(scanner)) {
+        return escl_backend_.scan(scanner, settings);
+    }
+
+    try {
+        return scan_backend_.scan(scanner, settings);
+    } catch (const std::exception& sane_error) {
+        if (!escl_backend_.acquisition_available()) {
+            throw;
+        }
+
+        const auto direct = matching_direct_escl(
+            scanner,
+            scan_backend_,
+            escl_backend_,
+            print_backend_);
+        if (!direct.has_value()) {
+            throw;
+        }
+
+        try {
+            return escl_backend_.scan(direct->name, settings);
+        } catch (const std::exception& escl_error) {
+            throw std::runtime_error(
+                std::string{"SANE acquisition failed: "} + sane_error.what() +
+                "; direct eSCL fallback failed: " + escl_error.what());
+        }
+    }
 }
 
 } // namespace docsuite
