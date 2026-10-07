@@ -16,7 +16,10 @@ void print_usage() {
         << "docsuite-device-cli list\n"
         << "docsuite-device-cli capabilities <printer> [--refresh]\n"
         << "docsuite-device-cli status <printer>\n"
-        << "docsuite-device-cli print <printer> <file> [color|mono]\n";
+        << "docsuite-device-cli jobs <printer> [active]\n"
+        << "docsuite-device-cli cancel <printer> <job-id>\n"
+        << "docsuite-device-cli print <printer> <file> [color|mono]\n"
+        << "docsuite-device-cli diagnose-print <printer> <file> [color|mono]\n";
 }
 
 const char* state_name(const docsuite::DeviceState state) {
@@ -50,6 +53,30 @@ void print_ints(const char* label, const std::vector<int>& values) {
         for (const int value : values) {
             std::cout << ' ' << value;
         }
+    }
+    std::cout << '\n';
+}
+
+[[nodiscard]] docsuite::PrintProfile profile_from_arg(const int argc, char** argv, const int index) {
+    docsuite::PrintProfile profile;
+    if (argc > index && std::string{argv[index]} == "mono") {
+        profile.name = "Monochrome";
+        profile.color_mode = "monochrome";
+    } else {
+        profile.name = "Color";
+        profile.color_mode = "color";
+    }
+    return profile;
+}
+
+void print_optional_duration(
+    const char* label,
+    const std::optional<std::chrono::milliseconds>& value) {
+    std::cout << label << ": ";
+    if (value.has_value()) {
+        std::cout << value->count() << " ms";
+    } else {
+        std::cout << "not reported";
     }
     std::cout << '\n';
 }
@@ -166,26 +193,85 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        if (command == "jobs") {
+            if (argc < 3) {
+                print_usage();
+                return 2;
+            }
+            const bool include_completed = !(argc >= 4 && std::string{argv[3]} == "active");
+            const auto jobs = manager.job_manager().list_jobs(argv[2], include_completed);
+            std::cout << "Jobs: " << jobs.size() << '\n';
+            for (const auto& job : jobs) {
+                std::cout << "  - #" << job.id
+                          << " | " << docsuite::print_job_state_name(job.state)
+                          << " | " << job.title
+                          << " | " << job.size_kib << " KiB";
+                if (!job.format.empty()) {
+                    std::cout << " | " << job.format;
+                }
+                std::cout << '\n';
+            }
+            return 0;
+        }
+
+        if (command == "cancel") {
+            if (argc < 4) {
+                print_usage();
+                return 2;
+            }
+            const int job_id = std::stoi(argv[3]);
+            const bool canceled = manager.job_manager().cancel(argv[2], job_id);
+            std::cout << (canceled ? "Canceled" : "Cancel failed")
+                      << " job " << job_id << '\n';
+            return canceled ? 0 : 1;
+        }
+
         if (command == "print") {
             if (argc < 4) {
                 print_usage();
                 return 2;
             }
 
-            docsuite::PrintProfile profile;
-            if (argc >= 5 && std::string{argv[4]} == "mono") {
-                profile.name = "Monochrome";
-                profile.color_mode = "monochrome";
-            } else {
-                profile.name = "Color";
-                profile.color_mode = "color";
-            }
-
+            const auto profile = profile_from_arg(argc, argv, 4);
             const int job_id = manager.print_backend().print_file(
                 argv[2], argv[3], "DocSuite print job", profile);
 
             std::cout << "Submitted CUPS job " << job_id << '\n';
             return 0;
+        }
+
+        if (command == "diagnose-print") {
+            if (argc < 4) {
+                print_usage();
+                return 2;
+            }
+
+            const auto profile = profile_from_arg(argc, argv, 4);
+            const auto trace = manager.job_manager().diagnose_print(
+                argv[2], argv[3], "DocSuite diagnostic print", profile);
+
+            std::cout << "Job: " << trace.job_id << '\n'
+                      << "Printer: " << trace.printer << '\n'
+                      << "Final state: " << docsuite::print_job_state_name(trace.final_state) << '\n'
+                      << "Submit -> CUPS accepted: " << trace.submit_to_accept.count() << " ms\n"
+                      << "Timeline:\n";
+
+            for (const auto& event : trace.events) {
+                std::cout << "  +" << event.since_submit.count() << " ms"
+                          << " | " << event.name
+                          << " | " << docsuite::print_job_state_name(event.state)
+                          << '\n';
+            }
+
+            print_optional_duration("CUPS queue delay", trace.queue_delay);
+            print_optional_duration("CUPS processing duration", trace.processing_duration);
+            print_optional_duration("CUPS total duration", trace.total_duration);
+            std::cout << "Timed out: " << (trace.timed_out ? "yes" : "no") << '\n';
+            if (!trace.history_path.empty()) {
+                std::cout << "History: " << trace.history_path << '\n';
+            }
+
+            return trace.final_state == docsuite::PrintJobState::completed ? 0 : 1;
         }
 
         print_usage();
