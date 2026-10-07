@@ -7,9 +7,7 @@
 #include "docsuite/ocr/tesseract_ocr.hpp"
 
 #include <QByteArray>
-#include <QFile>
 #include <QImage>
-#include <QPixmap>
 #include <QWidget>
 
 #include <memory>
@@ -33,6 +31,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    void load_capabilities();
     void start_scan(bool preview);
     void set_scan_frame(const std::shared_ptr<ScanFrame>& frame);
     void update_preview();
@@ -49,8 +48,10 @@ private:
     TesseractOcr ocr_{};
 
     QComboBox* scanner_{nullptr};
+    QComboBox* source_{nullptr};
     QComboBox* mode_{nullptr};
     QComboBox* dpi_{nullptr};
+    QLabel* capabilities_{nullptr};
     QPushButton* refresh_{nullptr};
     QPushButton* preview_{nullptr};
     QPushButton* scan_{nullptr};
