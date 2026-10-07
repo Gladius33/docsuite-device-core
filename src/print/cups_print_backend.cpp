@@ -5,17 +5,164 @@
 #include "docsuite/print/cups_print_backend.hpp"
 
 #include <cups/cups.h>
+#include <cups/ipp.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <stdexcept>
+#include <string_view>
+#include <unistd.h>
 
 namespace docsuite {
+namespace {
 
-std::vector<PrinterInfo> CupsPrintBackend::list_printers() const {
+[[nodiscard]] bool option_is_true(const char* value) {
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string_view text{value};
+    return text == "true" || text == "yes" || text == "1";
+}
+
+[[nodiscard]] std::string lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+[[nodiscard]] bool is_self_advertised_cups_queue(const std::string& uri) {
+    if (uri.find("._ipp._tcp.local/cups") == std::string::npos &&
+        uri.find("._ipps._tcp.local/cups") == std::string::npos) {
+        return false;
+    }
+
+    char hostname[256]{};
+    if (gethostname(hostname, sizeof(hostname) - 1U) != 0) {
+        return false;
+    }
+
+    const std::string lowered_uri = lower_copy(uri);
+    const std::string marker = "%40%20" + lower_copy(hostname) + ".";
+    return lowered_uri.find(marker) != std::string::npos;
+}
+
+[[nodiscard]] std::vector<std::string> ipp_strings(ipp_attribute_t* attribute) {
+    std::vector<std::string> values;
+    if (attribute == nullptr) {
+        return values;
+    }
+
+    const int count = ippGetCount(attribute);
+    values.reserve(static_cast<std::size_t>(std::max(count, 0)));
+    for (int i = 0; i < count; ++i) {
+        if (const char* value = ippGetString(attribute, i, nullptr)) {
+            values.emplace_back(value);
+        }
+    }
+    return values;
+}
+
+[[nodiscard]] std::vector<int> ipp_integers(ipp_attribute_t* attribute) {
+    std::vector<int> values;
+    if (attribute == nullptr) {
+        return values;
+    }
+
+    const int count = ippGetCount(attribute);
+    values.reserve(static_cast<std::size_t>(std::max(count, 0)));
+    for (int i = 0; i < count; ++i) {
+        values.push_back(ippGetInteger(attribute, i));
+    }
+    return values;
+}
+
+[[nodiscard]] std::vector<int> ipp_resolutions(ipp_attribute_t* attribute) {
+    std::vector<int> values;
+    if (attribute == nullptr) {
+        return values;
+    }
+
+    const int count = ippGetCount(attribute);
+    values.reserve(static_cast<std::size_t>(std::max(count, 0)));
+    for (int i = 0; i < count; ++i) {
+        int y_resolution = 0;
+        ipp_res_t units = IPP_RES_PER_INCH;
+        int x_resolution = ippGetResolution(attribute, i, &y_resolution, &units);
+        if (units == IPP_RES_PER_CM) {
+            x_resolution = static_cast<int>(std::lround(static_cast<double>(x_resolution) * 2.54));
+        }
+        if (x_resolution > 0) {
+            values.push_back(x_resolution);
+        }
+    }
+    return values;
+}
+
+[[nodiscard]] std::vector<std::string> split_csv(const char* raw) {
+    std::vector<std::string> values;
+    if (raw == nullptr || *raw == '\0') {
+        return values;
+    }
+
+    std::string input{raw};
+    std::size_t start = 0;
+    while (start <= input.size()) {
+        const std::size_t comma = input.find(',', start);
+        const std::size_t end = comma == std::string::npos ? input.size() : comma;
+        std::string value = input.substr(start, end - start);
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+            value.erase(value.begin());
+        }
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+            value.pop_back();
+        }
+        if (!value.empty()) {
+            values.push_back(std::move(value));
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1U;
+    }
+    return values;
+}
+
+[[nodiscard]] std::vector<int> split_csv_ints(const char* raw) {
+    std::vector<int> result;
+    for (const auto& value : split_csv(raw)) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value.c_str(), &end, 10);
+        if (end != value.c_str() && end != nullptr && *end == '\0') {
+            result.push_back(static_cast<int>(parsed));
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] DeviceState parse_printer_state(const char* state) {
+    if (state == nullptr) {
+        return DeviceState::unknown;
+    }
+    const int value = std::atoi(state);
+    switch (value) {
+        case 3: return DeviceState::idle;
+        case 4: return DeviceState::processing;
+        case 5: return DeviceState::stopped;
+        default: return DeviceState::unknown;
+    }
+}
+
+} // namespace
+
+std::vector<PrinterInfo> CupsPrintBackend::list_printers(const bool include_transient) const {
     cups_dest_t* destinations = nullptr;
     const int count = cupsGetDests(&destinations);
 
     std::vector<PrinterInfo> result;
-    result.reserve(static_cast<std::size_t>(count));
+    result.reserve(static_cast<std::size_t>(std::max(count, 0)));
 
     for (int i = 0; i < count; ++i) {
         const cups_dest_t& dest = destinations[i];
@@ -29,11 +176,132 @@ std::vector<PrinterInfo> CupsPrintBackend::list_printers() const {
         if (const char* model = cupsGetOption("printer-make-and-model", dest.num_options, dest.options)) {
             info.model = model;
         }
+        info.temporary = option_is_true(
+            cupsGetOption("printer-is-temporary", dest.num_options, dest.options));
+
+        const bool self_advertised = is_self_advertised_cups_queue(info.uri);
+        if (!include_transient && (info.temporary || self_advertised)) {
+            continue;
+        }
 
         result.push_back(std::move(info));
     }
 
     cupsFreeDests(count, destinations);
+    return result;
+}
+
+PrinterCapabilities CupsPrintBackend::capabilities(
+    const std::string& printer,
+    const bool force_refresh) const {
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::scoped_lock lock{capability_cache_mutex_};
+        const auto found = capability_cache_.find(printer);
+        if (!force_refresh && found != capability_cache_.end() &&
+            now - found->second.fetched_at < capability_ttl_) {
+            return found->second.value;
+        }
+    }
+
+    cups_dest_t* destination = cupsGetNamedDest(CUPS_HTTP_DEFAULT, printer.c_str(), nullptr);
+    if (destination == nullptr) {
+        throw std::runtime_error("CUPS destination not found: " + printer);
+    }
+
+    cups_dinfo_t* info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, destination);
+    if (info == nullptr) {
+        cupsFreeDests(1, destination);
+        throw std::runtime_error("Unable to query printer capabilities: " + printer);
+    }
+
+    PrinterCapabilities result;
+    result.printer = printer;
+    result.color_modes = ipp_strings(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "print-color-mode"));
+    result.media = ipp_strings(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "media"));
+    result.media_types = ipp_strings(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "media-type"));
+    result.media_sources = ipp_strings(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "media-source"));
+    result.sides = ipp_strings(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "sides"));
+    result.qualities = ipp_integers(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "print-quality"));
+    result.resolutions_dpi = ipp_resolutions(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "printer-resolution"));
+    result.document_formats = ipp_strings(cupsFindDestSupported(
+        CUPS_HTTP_DEFAULT, destination, info, "document-format"));
+
+    if (ipp_attribute_t* copies = cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "copies")) {
+        int upper = 1;
+        result.copies_min = ippGetRange(copies, 0, &upper);
+        result.copies_max = upper;
+    }
+
+    result.fetched_at = std::chrono::system_clock::now();
+
+    cupsFreeDestInfo(info);
+    cupsFreeDests(1, destination);
+
+    {
+        std::scoped_lock lock{capability_cache_mutex_};
+        capability_cache_[printer] = CachedCapabilities{
+            .value = result,
+            .fetched_at = now,
+        };
+    }
+
+    return result;
+}
+
+PrinterStatus CupsPrintBackend::status(const std::string& printer) const {
+    cups_dest_t* destination = cupsGetNamedDest(CUPS_HTTP_DEFAULT, printer.c_str(), nullptr);
+    if (destination == nullptr) {
+        throw std::runtime_error("CUPS destination not found: " + printer);
+    }
+
+    PrinterStatus result;
+    result.printer = printer;
+    result.state = parse_printer_state(cupsGetOption(
+        "printer-state", destination->num_options, destination->options));
+    result.accepting_jobs = option_is_true(cupsGetOption(
+        "printer-is-accepting-jobs", destination->num_options, destination->options));
+
+    result.reasons = split_csv(cupsGetOption(
+        "printer-state-reasons", destination->num_options, destination->options));
+    result.reasons.erase(
+        std::remove(result.reasons.begin(), result.reasons.end(), "none"),
+        result.reasons.end());
+
+    const auto names = split_csv(cupsGetOption(
+        "marker-names", destination->num_options, destination->options));
+    const auto types = split_csv(cupsGetOption(
+        "marker-types", destination->num_options, destination->options));
+    const auto levels = split_csv_ints(cupsGetOption(
+        "marker-levels", destination->num_options, destination->options));
+    const auto lows = split_csv_ints(cupsGetOption(
+        "marker-low-levels", destination->num_options, destination->options));
+
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        SupplyLevel supply;
+        supply.name = names[i];
+        if (i < types.size()) {
+            supply.type = types[i];
+        }
+        if (i < levels.size() && levels[i] >= 0 && levels[i] <= 100) {
+            supply.percent = levels[i];
+        }
+        if (i < lows.size() && lows[i] >= 0 && lows[i] <= 100) {
+            supply.low_threshold = lows[i];
+        }
+        result.supplies.push_back(std::move(supply));
+    }
+
+    cupsFreeDests(1, destination);
     return result;
 }
 
@@ -65,6 +333,11 @@ int CupsPrintBackend::print_file(
     }
 
     return job_id;
+}
+
+void CupsPrintBackend::clear_capability_cache() const {
+    std::scoped_lock lock{capability_cache_mutex_};
+    capability_cache_.clear();
 }
 
 } // namespace docsuite
