@@ -5,9 +5,11 @@
 #include "docsuite/print/cups_print_backend.hpp"
 
 #include <cups/cups.h>
+#include <cups/http.h>
 #include <cups/ipp.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -33,6 +35,12 @@ namespace {
     return value;
 }
 
+[[nodiscard]] bool is_dnssd_printer_uri(const std::string& uri) {
+    const auto lowered = lower_copy(uri);
+    return lowered.find("._ipp._tcp.local") != std::string::npos ||
+        lowered.find("._ipps._tcp.local") != std::string::npos;
+}
+
 [[nodiscard]] bool is_self_advertised_cups_queue(const std::string& uri) {
     if (uri.find("._ipp._tcp.local/cups") == std::string::npos &&
         uri.find("._ipps._tcp.local/cups") == std::string::npos) {
@@ -47,6 +55,29 @@ namespace {
     const std::string lowered_uri = lower_copy(uri);
     const std::string marker = "%40%20" + lower_copy(hostname) + ".";
     return lowered_uri.find(marker) != std::string::npos;
+}
+
+[[nodiscard]] std::string model_token_with_digit(const std::string& text) {
+    std::string token;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        const unsigned char ch = i < text.size()
+            ? static_cast<unsigned char>(text[i])
+            : static_cast<unsigned char>(' ');
+
+        if (std::isalnum(ch) != 0) {
+            token.push_back(static_cast<char>(std::tolower(ch)));
+            continue;
+        }
+
+        if (token.size() >= 4U &&
+            std::any_of(token.begin(), token.end(), [](const unsigned char value) {
+                return std::isdigit(value) != 0;
+            })) {
+            return token;
+        }
+        token.clear();
+    }
+    return {};
 }
 
 [[nodiscard]] std::vector<std::string> ipp_strings(ipp_attribute_t* attribute) {
@@ -142,11 +173,7 @@ namespace {
     return result;
 }
 
-[[nodiscard]] DeviceState parse_printer_state(const char* state) {
-    if (state == nullptr) {
-        return DeviceState::unknown;
-    }
-    const int value = std::atoi(state);
+[[nodiscard]] DeviceState parse_printer_state_value(const int value) {
     switch (value) {
         case 3: return DeviceState::idle;
         case 4: return DeviceState::processing;
@@ -155,14 +182,207 @@ namespace {
     }
 }
 
+[[nodiscard]] DeviceState parse_printer_state(const char* state) {
+    if (state == nullptr) {
+        return DeviceState::unknown;
+    }
+    return parse_printer_state_value(std::atoi(state));
+}
+
+void append_supplies(
+    PrinterStatus& result,
+    const std::vector<std::string>& names,
+    const std::vector<std::string>& types,
+    const std::vector<int>& levels,
+    const std::vector<int>& lows) {
+
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        SupplyLevel supply;
+        supply.name = names[i];
+        if (i < types.size()) {
+            supply.type = types[i];
+        }
+        if (i < levels.size() && levels[i] >= 0 && levels[i] <= 100) {
+            supply.percent = levels[i];
+        }
+        if (i < lows.size() && lows[i] >= 0 && lows[i] <= 100) {
+            supply.low_threshold = lows[i];
+        }
+        result.supplies.push_back(std::move(supply));
+    }
+}
+
+[[nodiscard]] PrinterStatus local_cups_status(
+    const std::string& printer,
+    const cups_dest_t& destination) {
+
+    PrinterStatus result;
+    result.printer = printer;
+    result.source = "cups";
+    result.state = parse_printer_state(cupsGetOption(
+        "printer-state", destination.num_options, destination.options));
+    result.accepting_jobs = option_is_true(cupsGetOption(
+        "printer-is-accepting-jobs", destination.num_options, destination.options));
+
+    result.reasons = split_csv(cupsGetOption(
+        "printer-state-reasons", destination.num_options, destination.options));
+    result.reasons.erase(
+        std::remove(result.reasons.begin(), result.reasons.end(), "none"),
+        result.reasons.end());
+
+    append_supplies(
+        result,
+        split_csv(cupsGetOption("marker-names", destination.num_options, destination.options)),
+        split_csv(cupsGetOption("marker-types", destination.num_options, destination.options)),
+        split_csv_ints(cupsGetOption("marker-levels", destination.num_options, destination.options)),
+        split_csv_ints(cupsGetOption("marker-low-levels", destination.num_options, destination.options)));
+
+    return result;
+}
+
+struct IppEndpoint {
+    std::string host;
+    std::string resource;
+    int port{631};
+    http_encryption_t encryption{HTTP_ENCRYPTION_NEVER};
+};
+
+[[nodiscard]] bool parse_ipp_endpoint(const std::string& uri, IppEndpoint& endpoint) {
+    std::array<char, 32> scheme{};
+    std::array<char, 256> username{};
+    std::array<char, 256> host{};
+    std::array<char, 1024> resource{};
+    int port = 0;
+
+    const auto status = httpSeparateURI(
+        HTTP_URI_CODING_ALL,
+        uri.c_str(),
+        scheme.data(), static_cast<int>(scheme.size()),
+        username.data(), static_cast<int>(username.size()),
+        host.data(), static_cast<int>(host.size()),
+        &port,
+        resource.data(), static_cast<int>(resource.size()));
+
+    if (status != HTTP_URI_STATUS_OK || host.front() == '\0') {
+        return false;
+    }
+
+    const std::string parsed_scheme = lower_copy(scheme.data());
+    if (parsed_scheme != "ipp" && parsed_scheme != "ipps") {
+        return false;
+    }
+
+    endpoint.host = host.data();
+    endpoint.resource = resource.front() != '\0' ? resource.data() : "/";
+    endpoint.port = port > 0 ? port : 631;
+    endpoint.encryption = parsed_scheme == "ipps"
+        ? HTTP_ENCRYPTION_ALWAYS
+        : HTTP_ENCRYPTION_NEVER;
+    return true;
+}
+
+[[nodiscard]] bool direct_ipp_status(
+    const std::string& printer,
+    const std::string& device_uri,
+    PrinterStatus& result) {
+
+    IppEndpoint endpoint;
+    if (!parse_ipp_endpoint(device_uri, endpoint)) {
+        return false;
+    }
+
+    http_t* connection = httpConnect2(
+        endpoint.host.c_str(),
+        endpoint.port,
+        nullptr,
+        AF_UNSPEC,
+        endpoint.encryption,
+        1,
+        3000,
+        nullptr);
+    if (connection == nullptr) {
+        return false;
+    }
+
+    ipp_t* request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
+    ippAddString(
+        request,
+        IPP_TAG_OPERATION,
+        IPP_TAG_URI,
+        "printer-uri",
+        nullptr,
+        device_uri.c_str());
+
+    static const char* const requested_attributes[] = {
+        "printer-state",
+        "printer-is-accepting-jobs",
+        "printer-state-reasons",
+        "marker-names",
+        "marker-types",
+        "marker-levels",
+        "marker-low-levels",
+    };
+
+    ippAddStrings(
+        request,
+        IPP_TAG_OPERATION,
+        IPP_TAG_KEYWORD,
+        "requested-attributes",
+        static_cast<int>(std::size(requested_attributes)),
+        nullptr,
+        requested_attributes);
+
+    ipp_t* response = cupsDoRequest(connection, request, endpoint.resource.c_str());
+    httpClose(connection);
+    if (response == nullptr) {
+        return false;
+    }
+
+    if (ippGetStatusCode(response) >= IPP_STATUS_ERROR_BAD_REQUEST) {
+        ippDelete(response);
+        return false;
+    }
+
+    PrinterStatus direct;
+    direct.printer = printer;
+    direct.source = "ipp-direct";
+
+    if (ipp_attribute_t* attribute = ippFindAttribute(
+            response, "printer-state", IPP_TAG_ENUM)) {
+        direct.state = parse_printer_state_value(ippGetInteger(attribute, 0));
+    }
+
+    if (ipp_attribute_t* attribute = ippFindAttribute(
+            response, "printer-is-accepting-jobs", IPP_TAG_BOOLEAN)) {
+        direct.accepting_jobs = ippGetBoolean(attribute, 0) != 0;
+    }
+
+    direct.reasons = ipp_strings(ippFindAttribute(
+        response, "printer-state-reasons", IPP_TAG_KEYWORD));
+    direct.reasons.erase(
+        std::remove(direct.reasons.begin(), direct.reasons.end(), "none"),
+        direct.reasons.end());
+
+    append_supplies(
+        direct,
+        ipp_strings(ippFindAttribute(response, "marker-names", IPP_TAG_NAME)),
+        ipp_strings(ippFindAttribute(response, "marker-types", IPP_TAG_KEYWORD)),
+        ipp_integers(ippFindAttribute(response, "marker-levels", IPP_TAG_INTEGER)),
+        ipp_integers(ippFindAttribute(response, "marker-low-levels", IPP_TAG_INTEGER)));
+
+    ippDelete(response);
+    result = std::move(direct);
+    return true;
+}
+
 } // namespace
 
 std::vector<PrinterInfo> CupsPrintBackend::list_printers(const bool include_transient) const {
     cups_dest_t* destinations = nullptr;
     const int count = cupsGetDests(&destinations);
 
-    std::vector<PrinterInfo> result;
-    result.reserve(static_cast<std::size_t>(std::max(count, 0)));
+    std::vector<PrinterInfo> all;
+    all.reserve(static_cast<std::size_t>(std::max(count, 0)));
 
     for (int i = 0; i < count; ++i) {
         const cups_dest_t& dest = destinations[i];
@@ -178,16 +398,41 @@ std::vector<PrinterInfo> CupsPrintBackend::list_printers(const bool include_tran
         }
         info.temporary = option_is_true(
             cupsGetOption("printer-is-temporary", dest.num_options, dest.options));
-
-        const bool self_advertised = is_self_advertised_cups_queue(info.uri);
-        if (!include_transient && (info.temporary || self_advertised)) {
-            continue;
-        }
-
-        result.push_back(std::move(info));
+        all.push_back(std::move(info));
     }
 
     cupsFreeDests(count, destinations);
+    if (include_transient) {
+        return all;
+    }
+
+    std::vector<PrinterInfo> result;
+    result.reserve(all.size());
+
+    for (const auto& candidate : all) {
+        if (candidate.temporary || is_self_advertised_cups_queue(candidate.uri)) {
+            continue;
+        }
+
+        if (is_dnssd_printer_uri(candidate.uri)) {
+            const std::string candidate_token = model_token_with_digit(
+                candidate.model + " " + candidate.name);
+            const bool represented_by_managed_queue = !candidate_token.empty() && std::any_of(
+                all.begin(), all.end(),
+                [&candidate, &candidate_token](const PrinterInfo& other) {
+                    if (&candidate == &other || other.temporary || is_dnssd_printer_uri(other.uri)) {
+                        return false;
+                    }
+                    return model_token_with_digit(other.model + " " + other.name) == candidate_token;
+                });
+            if (represented_by_managed_queue) {
+                continue;
+            }
+        }
+
+        result.push_back(candidate);
+    }
+
     return result;
 }
 
@@ -264,45 +509,23 @@ PrinterStatus CupsPrintBackend::status(const std::string& printer) const {
         throw std::runtime_error("CUPS destination not found: " + printer);
     }
 
-    PrinterStatus result;
-    result.printer = printer;
-    result.state = parse_printer_state(cupsGetOption(
-        "printer-state", destination->num_options, destination->options));
-    result.accepting_jobs = option_is_true(cupsGetOption(
-        "printer-is-accepting-jobs", destination->num_options, destination->options));
+    PrinterStatus local = local_cups_status(printer, *destination);
+    const char* raw_device_uri = cupsGetOption(
+        "device-uri", destination->num_options, destination->options);
 
-    result.reasons = split_csv(cupsGetOption(
-        "printer-state-reasons", destination->num_options, destination->options));
-    result.reasons.erase(
-        std::remove(result.reasons.begin(), result.reasons.end(), "none"),
-        result.reasons.end());
-
-    const auto names = split_csv(cupsGetOption(
-        "marker-names", destination->num_options, destination->options));
-    const auto types = split_csv(cupsGetOption(
-        "marker-types", destination->num_options, destination->options));
-    const auto levels = split_csv_ints(cupsGetOption(
-        "marker-levels", destination->num_options, destination->options));
-    const auto lows = split_csv_ints(cupsGetOption(
-        "marker-low-levels", destination->num_options, destination->options));
-
-    for (std::size_t i = 0; i < names.size(); ++i) {
-        SupplyLevel supply;
-        supply.name = names[i];
-        if (i < types.size()) {
-            supply.type = types[i];
+    if (raw_device_uri != nullptr) {
+        PrinterStatus direct;
+        if (direct_ipp_status(printer, raw_device_uri, direct)) {
+            if (direct.supplies.empty()) {
+                direct.supplies = local.supplies;
+            }
+            cupsFreeDests(1, destination);
+            return direct;
         }
-        if (i < levels.size() && levels[i] >= 0 && levels[i] <= 100) {
-            supply.percent = levels[i];
-        }
-        if (i < lows.size() && lows[i] >= 0 && lows[i] <= 100) {
-            supply.low_threshold = lows[i];
-        }
-        result.supplies.push_back(std::move(supply));
     }
 
     cupsFreeDests(1, destination);
-    return result;
+    return local;
 }
 
 int CupsPrintBackend::print_file(
