@@ -3,6 +3,7 @@ import base64
 import http.server
 import socketserver
 import sys
+import threading
 
 HOST = "127.0.0.1"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18080
@@ -41,28 +42,49 @@ CAPABILITIES = b'''<?xml version="1.0" encoding="UTF-8"?>
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    next_document_attempts = 0
+    attempt_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         pass
 
-    def send_bytes(self, status, data, content_type):
+    def send_bytes(self, status, data, content_type, extra_headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(data)
+        if data:
+            self.wfile.write(data)
 
     def do_GET(self):
         if self.path == "/eSCL/ScannerCapabilities":
             self.send_bytes(200, CAPABILITIES, "text/xml")
             return
+
         if self.path == "/eSCL/ScanJobs/1/NextDocument":
+            with type(self).attempt_lock:
+                type(self).next_document_attempts += 1
+                attempt = type(self).next_document_attempts
+
+            if attempt <= 2:
+                self.send_bytes(
+                    503,
+                    b"scanner warming up",
+                    "text/plain",
+                    {"Retry-After": "1"},
+                )
+                return
+
             self.send_bytes(200, JPEG, "image/jpeg")
             return
+
         if self.path == "/eSCL/ScannerStatus":
             status = b'<scan:ScannerStatus xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03" xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm"><pwg:State>Idle</pwg:State></scan:ScannerStatus>'
             self.send_bytes(200, status, "text/xml")
             return
+
         self.send_bytes(404, b"", "text/plain")
 
     def do_POST(self):
@@ -77,9 +99,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             b"<scan:XResolution>300</scan:XResolution>",
             b"<scan:YResolution>300</scan:YResolution>",
             b"<pwg:InputSource>Platen</pwg:InputSource>",
+            b"<scan:ScanRegions>",
+            b"<pwg:Width>2550</pwg:Width>",
+            b"<pwg:Height>3508</pwg:Height>",
+            b"<pwg:XOffset>0</pwg:XOffset>",
+            b"<pwg:YOffset>0</pwg:YOffset>",
         ]
-        if any(token not in body for token in required):
-            self.send_bytes(400, b"invalid ScanSettings", "text/plain")
+        missing = [token.decode("ascii") for token in required if token not in body]
+        if missing:
+            message = ("invalid ScanSettings; missing: " + ", ".join(missing)).encode()
+            self.send_bytes(400, message, "text/plain")
             return
 
         self.send_response(201)
