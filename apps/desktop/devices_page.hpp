@@ -3,8 +3,6 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #pragma once
 
-#include "docsuite/device/device_manager.hpp"
-
 #include <QWidget>
 
 #include <memory>
@@ -16,15 +14,19 @@ class QTextEdit;
 
 namespace docsuite::desktop {
 
+class DeviceServiceGateway;
+
 class DevicesPage final : public QWidget {
 public:
-    explicit DevicesPage(std::shared_ptr<DeviceManager> manager, QWidget* parent = nullptr);
+    explicit DevicesPage(
+        std::shared_ptr<DeviceServiceGateway> gateway,
+        QWidget* parent = nullptr);
     void refresh();
 
 private:
     void load_printer_details(const QString& printer_name);
 
-    std::shared_ptr<DeviceManager> manager_;
+    std::shared_ptr<DeviceServiceGateway> gateway_;
     QLabel* summary_{nullptr};
     QPushButton* refresh_button_{nullptr};
     QListWidget* printers_{nullptr};
