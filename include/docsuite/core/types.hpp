@@ -43,6 +43,7 @@ struct SupplyLevel {
 
 struct PrinterCapabilities {
     std::string printer;
+    std::string source{"cups"};
     std::vector<std::string> color_modes;
     std::vector<std::string> media;
     std::vector<std::string> media_types;
