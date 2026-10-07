@@ -62,6 +62,7 @@ QString format_details(const PrinterDetails& details) {
 
     QString text;
     text += QString("Status source: %1\n").arg(QString::fromStdString(status.source));
+    text += QString("Capability source: %1\n").arg(QString::fromStdString(caps.source));
     text += QString("State: %1\n").arg(state_name(status.state));
     text += QString("Accepting jobs: %1\n").arg(status.accepting_jobs ? "yes" : "no");
     text += QString("Reasons: %1\n\n").arg(join_strings(status.reasons));
