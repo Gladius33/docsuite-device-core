@@ -81,9 +81,12 @@ struct DeviceSnapshot {
 struct PrintProfile {
     std::string name;
     std::string media{"iso_a4_210x297mm"};
+    std::string media_source{};
+    std::string media_type{};
     std::string color_mode{"color"};
     std::string sides{"one-sided"};
     int quality{4};
+    int copies{1};
 };
 
 struct PrintJobInfo {
