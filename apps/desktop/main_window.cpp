@@ -14,6 +14,7 @@
 
 #include <QFutureWatcher>
 #include <QLabel>
+#include <QSettings>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -29,14 +30,27 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowTitle(QStringLiteral("DocSuite Device Center"));
     resize(1280, 860);
 
-    auto* tabs = new QTabWidget(this);
-    tabs->addTab(new DevicesPage(gateway_, tabs), QStringLiteral("Devices"));
-    tabs->addTab(new ScanPage(manager_, tabs), QStringLiteral("Scan / OCR"));
-    tabs->addTab(new DocumentPage(manager_, tabs), QStringLiteral("Document"));
-    tabs->addTab(new CopyPage(manager_, tabs), QStringLiteral("Copy"));
-    tabs->addTab(new PrintPage(manager_, tabs), QStringLiteral("Print / Jobs"));
-    tabs->addTab(new SystemPage(manager_, tabs), QStringLiteral("System"));
-    setCentralWidget(tabs);
+    tabs_ = new QTabWidget(this);
+    tabs_->addTab(new DevicesPage(gateway_, tabs_), QStringLiteral("Devices"));
+    tabs_->addTab(new ScanPage(manager_, tabs_), QStringLiteral("Scan / OCR"));
+    tabs_->addTab(new DocumentPage(manager_, tabs_), QStringLiteral("Document"));
+    tabs_->addTab(new CopyPage(manager_, tabs_), QStringLiteral("Copy"));
+    tabs_->addTab(new PrintPage(manager_, tabs_), QStringLiteral("Print / Jobs"));
+    tabs_->addTab(new SystemPage(manager_, tabs_), QStringLiteral("System"));
+    setCentralWidget(tabs_);
+
+    QSettings settings;
+    const QByteArray geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
+    if (!geometry.isEmpty()) {
+        restoreGeometry(geometry);
+    }
+    const int saved_tab = settings.value(QStringLiteral("window/tab"), 0).toInt();
+    if (saved_tab >= 0 && saved_tab < tabs_->count()) {
+        tabs_->setCurrentIndex(saved_tab);
+    }
+    connect(tabs_, &QTabWidget::currentChanged, this, [](const int index) {
+        QSettings{}.setValue(QStringLiteral("window/tab"), index);
+    });
 
     service_status_ = new QLabel(QStringLiteral("Service: checking…"), this);
     service_status_->setToolTip(QStringLiteral(
@@ -48,6 +62,14 @@ MainWindow::MainWindow(QWidget* parent)
     connect(service_timer_, &QTimer::timeout, this, [this]() { refresh_service_status(); });
     service_timer_->start();
     refresh_service_status();
+}
+
+MainWindow::~MainWindow() {
+    QSettings settings;
+    settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    if (tabs_ != nullptr) {
+        settings.setValue(QStringLiteral("window/tab"), tabs_->currentIndex());
+    }
 }
 
 void MainWindow::refresh_service_status() {
