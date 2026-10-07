@@ -1,0 +1,12 @@
+[Unit]
+Description=DocSuite Device Core local service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/docsuite-device-service
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
