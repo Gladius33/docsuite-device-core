@@ -3,20 +3,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "docsuite/print/cups_print_backend.hpp"
+#include "docsuite/print/direct_ipp_probe.hpp"
 
 #include <cups/cups.h>
-#include <cups/http.h>
 #include <cups/ipp.h>
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <iterator>
 #include <stdexcept>
 #include <string_view>
 #include <unistd.h>
+#include <utility>
 
 namespace docsuite {
 namespace {
@@ -241,214 +240,6 @@ void append_supplies(
     return result;
 }
 
-struct IppEndpoint {
-    std::string host;
-    std::string resource;
-    int port{631};
-    http_encryption_t encryption{HTTP_ENCRYPTION_NEVER};
-};
-
-[[nodiscard]] bool parse_ipp_endpoint(const std::string& uri, IppEndpoint& endpoint) {
-    std::array<char, 32> scheme{};
-    std::array<char, 256> username{};
-    std::array<char, 256> host{};
-    std::array<char, 1024> resource{};
-    int port = 0;
-
-    const auto status = httpSeparateURI(
-        HTTP_URI_CODING_ALL,
-        uri.c_str(),
-        scheme.data(), static_cast<int>(scheme.size()),
-        username.data(), static_cast<int>(username.size()),
-        host.data(), static_cast<int>(host.size()),
-        &port,
-        resource.data(), static_cast<int>(resource.size()));
-
-    if (status != HTTP_URI_STATUS_OK || host.front() == '\0') {
-        return false;
-    }
-
-    const std::string parsed_scheme = lower_copy(scheme.data());
-    if (parsed_scheme != "ipp" && parsed_scheme != "ipps") {
-        return false;
-    }
-
-    endpoint.host = host.data();
-    endpoint.resource = resource.front() != '\0' ? resource.data() : "/";
-    endpoint.port = port > 0 ? port : 631;
-    endpoint.encryption = parsed_scheme == "ipps"
-        ? HTTP_ENCRYPTION_ALWAYS
-        : HTTP_ENCRYPTION_NEVER;
-    return true;
-}
-
-[[nodiscard]] ipp_t* direct_ipp_query(
-    const std::string& device_uri,
-    const char* const* requested_attributes,
-    const int requested_attribute_count) {
-
-    IppEndpoint endpoint;
-    if (!parse_ipp_endpoint(device_uri, endpoint)) {
-        return nullptr;
-    }
-
-    http_t* connection = httpConnect2(
-        endpoint.host.c_str(),
-        endpoint.port,
-        nullptr,
-        AF_UNSPEC,
-        endpoint.encryption,
-        1,
-        3000,
-        nullptr);
-    if (connection == nullptr) {
-        return nullptr;
-    }
-
-    ipp_t* request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
-    ippAddString(
-        request,
-        IPP_TAG_OPERATION,
-        IPP_TAG_URI,
-        "printer-uri",
-        nullptr,
-        device_uri.c_str());
-    ippAddStrings(
-        request,
-        IPP_TAG_OPERATION,
-        IPP_TAG_KEYWORD,
-        "requested-attributes",
-        requested_attribute_count,
-        nullptr,
-        requested_attributes);
-
-    ipp_t* response = cupsDoRequest(connection, request, endpoint.resource.c_str());
-    httpClose(connection);
-    if (response == nullptr) {
-        return nullptr;
-    }
-
-    if (ippGetStatusCode(response) >= IPP_STATUS_ERROR_BAD_REQUEST) {
-        ippDelete(response);
-        return nullptr;
-    }
-
-    return response;
-}
-
-[[nodiscard]] bool direct_ipp_capabilities(
-    const std::string& printer,
-    const std::string& device_uri,
-    PrinterCapabilities& result) {
-
-    static const char* const requested_attributes[] = {
-        "print-color-mode-supported",
-        "media-supported",
-        "media-type-supported",
-        "media-source-supported",
-        "sides-supported",
-        "print-quality-supported",
-        "printer-resolution-supported",
-        "document-format-supported",
-        "copies-supported",
-    };
-
-    ipp_t* response = direct_ipp_query(
-        device_uri,
-        requested_attributes,
-        static_cast<int>(std::size(requested_attributes)));
-    if (response == nullptr) {
-        return false;
-    }
-
-    PrinterCapabilities direct;
-    direct.printer = printer;
-    direct.source = "ipp-direct";
-    direct.color_modes = ipp_strings(ippFindAttribute(
-        response, "print-color-mode-supported", IPP_TAG_KEYWORD));
-    direct.media = ipp_strings(ippFindAttribute(
-        response, "media-supported", IPP_TAG_KEYWORD));
-    direct.media_types = ipp_strings(ippFindAttribute(
-        response, "media-type-supported", IPP_TAG_KEYWORD));
-    direct.media_sources = ipp_strings(ippFindAttribute(
-        response, "media-source-supported", IPP_TAG_KEYWORD));
-    direct.sides = ipp_strings(ippFindAttribute(
-        response, "sides-supported", IPP_TAG_KEYWORD));
-    direct.qualities = ipp_integers(ippFindAttribute(
-        response, "print-quality-supported", IPP_TAG_ENUM));
-    direct.resolutions_dpi = ipp_resolutions(ippFindAttribute(
-        response, "printer-resolution-supported", IPP_TAG_RESOLUTION));
-    direct.document_formats = ipp_strings(ippFindAttribute(
-        response, "document-format-supported", IPP_TAG_MIMETYPE));
-
-    if (ipp_attribute_t* copies = ippFindAttribute(
-            response, "copies-supported", IPP_TAG_RANGE)) {
-        int upper = 1;
-        direct.copies_min = ippGetRange(copies, 0, &upper);
-        direct.copies_max = upper;
-    }
-
-    direct.fetched_at = std::chrono::system_clock::now();
-    ippDelete(response);
-    result = std::move(direct);
-    return true;
-}
-
-[[nodiscard]] bool direct_ipp_status(
-    const std::string& printer,
-    const std::string& device_uri,
-    PrinterStatus& result) {
-
-    static const char* const requested_attributes[] = {
-        "printer-state",
-        "printer-is-accepting-jobs",
-        "printer-state-reasons",
-        "marker-names",
-        "marker-types",
-        "marker-levels",
-        "marker-low-levels",
-    };
-
-    ipp_t* response = direct_ipp_query(
-        device_uri,
-        requested_attributes,
-        static_cast<int>(std::size(requested_attributes)));
-    if (response == nullptr) {
-        return false;
-    }
-
-    PrinterStatus direct;
-    direct.printer = printer;
-    direct.source = "ipp-direct";
-
-    if (ipp_attribute_t* attribute = ippFindAttribute(
-            response, "printer-state", IPP_TAG_ENUM)) {
-        direct.state = parse_printer_state_value(ippGetInteger(attribute, 0));
-    }
-
-    if (ipp_attribute_t* attribute = ippFindAttribute(
-            response, "printer-is-accepting-jobs", IPP_TAG_BOOLEAN)) {
-        direct.accepting_jobs = ippGetBoolean(attribute, 0) != 0;
-    }
-
-    direct.reasons = ipp_strings(ippFindAttribute(
-        response, "printer-state-reasons", IPP_TAG_KEYWORD));
-    direct.reasons.erase(
-        std::remove(direct.reasons.begin(), direct.reasons.end(), "none"),
-        direct.reasons.end());
-
-    append_supplies(
-        direct,
-        ipp_strings(ippFindAttribute(response, "marker-names", IPP_TAG_NAME)),
-        ipp_strings(ippFindAttribute(response, "marker-types", IPP_TAG_KEYWORD)),
-        ipp_integers(ippFindAttribute(response, "marker-levels", IPP_TAG_INTEGER)),
-        ipp_integers(ippFindAttribute(response, "marker-low-levels", IPP_TAG_INTEGER)));
-
-    ippDelete(response);
-    result = std::move(direct);
-    return true;
-}
-
 } // namespace
 
 std::vector<PrinterInfo> CupsPrintBackend::list_printers(const bool include_transient) const {
@@ -530,13 +321,22 @@ PrinterCapabilities CupsPrintBackend::capabilities(
     }
 
     PrinterCapabilities result;
+    bool loaded_direct = false;
     const char* raw_device_uri = cupsGetOption(
         "device-uri", destination->num_options, destination->options);
 
-    if (raw_device_uri != nullptr &&
-        direct_ipp_capabilities(printer, raw_device_uri, result)) {
-        cupsFreeDests(1, destination);
-    } else {
+    if (raw_device_uri != nullptr) {
+        try {
+            result = DirectIppProbe{}.capabilities(raw_device_uri);
+            result.printer = printer;
+            loaded_direct = true;
+        } catch (const std::exception&) {
+            // A proprietary, stale or temporarily unreachable device URI must not
+            // prevent CUPS from providing its own normalized destination data.
+        }
+    }
+
+    if (!loaded_direct) {
         cups_dinfo_t* info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, destination);
         if (info == nullptr) {
             cupsFreeDests(1, destination);
@@ -571,8 +371,9 @@ PrinterCapabilities CupsPrintBackend::capabilities(
 
         result.fetched_at = std::chrono::system_clock::now();
         cupsFreeDestInfo(info);
-        cupsFreeDests(1, destination);
     }
+
+    cupsFreeDests(1, destination);
 
     {
         std::scoped_lock lock{capability_cache_mutex_};
@@ -596,13 +397,17 @@ PrinterStatus CupsPrintBackend::status(const std::string& printer) const {
         "device-uri", destination->num_options, destination->options);
 
     if (raw_device_uri != nullptr) {
-        PrinterStatus direct;
-        if (direct_ipp_status(printer, raw_device_uri, direct)) {
+        try {
+            PrinterStatus direct = DirectIppProbe{}.status(raw_device_uri);
+            direct.printer = printer;
             if (direct.supplies.empty()) {
                 direct.supplies = local.supplies;
             }
             cupsFreeDests(1, destination);
             return direct;
+        } catch (const std::exception&) {
+            // Preserve the local CUPS status when the physical endpoint cannot
+            // be queried directly.
         }
     }
 
