@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "document_page.hpp"
+#include "selection_preview.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -15,7 +16,6 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
-#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
@@ -147,6 +147,9 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     auto* process_group = new QGroupBox(QStringLiteral("Selected page processing"), left);
     auto* process_layout = new QVBoxLayout(process_group);
     auto_crop_ = new QPushButton(QStringLiteral("Auto crop content"), process_group);
+    crop_selection_ = new QPushButton(QStringLiteral("Crop selection"), process_group);
+    crop_selection_->setToolTip(QStringLiteral(
+        "Drag a rectangle over the page preview, then crop to that exact source area."));
     enhance_ = new QPushButton(QStringLiteral("Enhance document contrast"), process_group);
     binarize_ = new QPushButton(QStringLiteral("Black && white document"), process_group);
     deskew_ = new QPushButton(QStringLiteral("Automatic deskew"), process_group);
@@ -155,6 +158,7 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
         deskew_->setToolTip(QStringLiteral("Deskew is available when DocSuite is built with OpenCV."));
     }
     process_layout->addWidget(auto_crop_);
+    process_layout->addWidget(crop_selection_);
     process_layout->addWidget(enhance_);
     process_layout->addWidget(binarize_);
     process_layout->addWidget(deskew_);
@@ -167,9 +171,7 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
 
     preview_scroll_ = new QScrollArea(splitter);
     preview_scroll_->setWidgetResizable(true);
-    preview_ = new QLabel(preview_scroll_);
-    preview_->setAlignment(Qt::AlignCenter);
-    preview_->setText(QStringLiteral("No document pages yet"));
+    preview_ = new SelectionPreview(preview_scroll_);
     preview_scroll_->setWidget(preview_);
 
     splitter->addWidget(left);
@@ -188,6 +190,7 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     connect(down_, &QPushButton::clicked, this, [this]() { move_selected(1); });
     connect(clear_, &QPushButton::clicked, this, [this]() { clear_pages(); });
     connect(auto_crop_, &QPushButton::clicked, this, [this]() { transform_selected("crop"); });
+    connect(crop_selection_, &QPushButton::clicked, this, [this]() { crop_selection(); });
     connect(enhance_, &QPushButton::clicked, this, [this]() { transform_selected("enhance"); });
     connect(binarize_, &QPushButton::clicked, this, [this]() { transform_selected("binarize"); });
     connect(deskew_, &QPushButton::clicked, this, [this]() { transform_selected("deskew"); });
@@ -452,7 +455,7 @@ void DocumentPage::transform_selected(const std::string& operation) {
         pages_[static_cast<std::size_t>(row)].image,
         pages_[static_cast<std::size_t>(row)].dpi);
 
-    for (auto* button : {auto_crop_, enhance_, binarize_, deskew_, ocr_button_}) {
+    for (auto* button : {auto_crop_, crop_selection_, enhance_, binarize_, deskew_, ocr_button_}) {
         button->setEnabled(false);
     }
     status_->setText(
@@ -509,6 +512,77 @@ void DocumentPage::transform_selected(const std::string& operation) {
             throw std::runtime_error("Unknown document transform: " + operation);
         }
         return std::make_shared<ScanFrame>(std::move(output));
+    }));
+}
+
+void DocumentPage::crop_selection() {
+    const int row = pages_list_->currentRow();
+    if (row < 0 || row >= static_cast<int>(pages_.size())) {
+        return;
+    }
+
+    const auto selected = preview_->selected_image_rect();
+    if (!selected.has_value()) {
+        status_->setText(QStringLiteral(
+            "Drag a rectangle over the preview first, then click Crop selection."));
+        return;
+    }
+
+    const ScanFrame input = frame_from_image(
+        pages_[static_cast<std::size_t>(row)].image,
+        pages_[static_cast<std::size_t>(row)].dpi);
+    const ImageRect rect{
+        .x = selected->x(),
+        .y = selected->y(),
+        .width = selected->width(),
+        .height = selected->height(),
+    };
+
+    for (auto* button : {auto_crop_, crop_selection_, enhance_, binarize_, deskew_, ocr_button_}) {
+        button->setEnabled(false);
+    }
+    status_->setText(
+        QStringLiteral("Cropping page %1 to %2 × %3 px…")
+            .arg(row + 1)
+            .arg(rect.width)
+            .arg(rect.height));
+
+    using FramePtr = std::shared_ptr<ScanFrame>;
+    auto* watcher = new QFutureWatcher<FramePtr>(this);
+    connect(watcher, &QFutureWatcher<FramePtr>::finished, this,
+        [this, watcher, row]() {
+            try {
+                const auto frame = watcher->result();
+                if (!frame) {
+                    throw std::runtime_error("Manual crop returned no frame");
+                }
+                if (row < static_cast<int>(pages_.size())) {
+                    QImage image = image_from_frame(*frame);
+                    if (image.isNull()) {
+                        throw std::runtime_error("Manual crop produced an empty image");
+                    }
+                    auto& page = pages_[static_cast<std::size_t>(row)];
+                    page.image = std::move(image);
+                    page.dpi = frame->dpi > 0 ? frame->dpi : page.dpi;
+                    page.ocr.reset();
+                    update_list();
+                    pages_list_->setCurrentRow(row);
+                    status_->setText(
+                        QStringLiteral("Page %1 cropped to selection — rerun OCR if needed")
+                            .arg(row + 1));
+                }
+            } catch (const std::exception& error) {
+                status_->setText(
+                    QStringLiteral("Manual crop error: %1")
+                        .arg(QString::fromUtf8(error.what())));
+            }
+            update_list();
+            watcher->deleteLater();
+        });
+
+    watcher->setFuture(QtConcurrent::run([input, rect]() -> FramePtr {
+        ImageProcessor processor;
+        return std::make_shared<ScanFrame>(processor.crop(input, rect));
     }));
 }
 
@@ -571,6 +645,7 @@ void DocumentPage::update_list() {
     clear_->setEnabled(has_pages);
     export_->setEnabled(has_pages);
     auto_crop_->setEnabled(has_pages);
+    crop_selection_->setEnabled(has_pages);
     enhance_->setEnabled(has_pages);
     binarize_->setEnabled(has_pages);
     deskew_->setEnabled(has_pages && processor_.deskew_available());
@@ -581,18 +656,10 @@ void DocumentPage::update_list() {
 void DocumentPage::update_preview() {
     const int row = pages_list_->currentRow();
     if (row < 0 || row >= static_cast<int>(pages_.size())) {
-        preview_->setPixmap(QPixmap{});
-        preview_->setText(QStringLiteral("No document pages yet"));
+        preview_->clear_image();
         return;
     }
-    preview_->setText(QString{});
-    QSize area = preview_scroll_->viewport()->size() - QSize(24, 24);
-    if (area.width() < 100 || area.height() < 100) {
-        area = QSize(800, 700);
-    }
-    preview_->setPixmap(
-        QPixmap::fromImage(pages_[static_cast<std::size_t>(row)].image)
-            .scaled(area, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    preview_->set_image(pages_[static_cast<std::size_t>(row)].image);
 }
 
 } // namespace docsuite::desktop
