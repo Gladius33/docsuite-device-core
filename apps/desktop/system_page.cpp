@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
@@ -82,24 +83,6 @@ namespace {
     return {};
 }
 
-[[nodiscard]] int preferred_quality(
-    const PrinterCapabilities& caps,
-    const int wanted) {
-    if (std::find(caps.qualities.begin(), caps.qualities.end(), wanted) != caps.qualities.end()) {
-        return wanted;
-    }
-    return caps.qualities.empty() ? wanted : caps.qualities.front();
-}
-
-[[nodiscard]] std::string preferred_keyword(
-    const std::vector<std::string>& values,
-    const std::string& wanted) {
-    if (has_value(values, wanted)) {
-        return wanted;
-    }
-    return values.empty() ? wanted : values.front();
-}
-
 [[nodiscard]] std::string preferred_media(const PrinterCapabilities& caps) {
     if (has_value(caps.media, "iso_a4_210x297mm")) {
         return "iso_a4_210x297mm";
@@ -111,16 +94,13 @@ namespace {
     const PrinterCapabilities& caps) {
 
     const std::string media = preferred_media(caps);
-    const std::string mono = preferred_keyword(caps.color_modes, "monochrome");
-    const std::string color = preferred_keyword(caps.color_modes, "color");
-    const std::string one_sided = preferred_keyword(caps.sides, "one-sided");
 
     PrintProfile monochrome;
     monochrome.name = "Noir et blanc";
     monochrome.media = media;
-    monochrome.color_mode = mono;
-    monochrome.sides = one_sided;
-    monochrome.quality = preferred_quality(caps, 4);
+    monochrome.color_mode = "monochrome";
+    monochrome.sides = "one-sided";
+    monochrome.quality = 4;
 
     PrintProfile draft = monochrome;
     draft.name = "Brouillon rapide";
@@ -138,8 +118,8 @@ namespace {
     if (photo.media.empty()) {
         photo.media = media;
     }
-    photo.color_mode = color;
-    photo.sides = one_sided;
+    photo.color_mode = "color";
+    photo.sides = "one-sided";
     photo.quality = 5;
     photo.media_type = first_matching(
         caps.media_types,
@@ -209,7 +189,7 @@ SystemPage::SystemPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
         QStringLiteral(
             "The driverless queue uses the CUPS Create-Local-Printer operation, not lpadmin. "
             "Saved profiles are CUPS destination instances in the current user's lpoptions, not extra physical printers. "
-            "Profiles are created only when their standard IPP values are supported. "
+            "Profiles are created only when their exact standard IPP values are supported. "
             "Local queues created through Create-Local-Printer are temporary and can disappear after a CUPS or system restart; "
             "making a queue permanently shared remains an administrator action."),
         this);
@@ -407,7 +387,7 @@ void SystemPage::install_profiles() {
                 skipped << QString::fromStdString(instance);
                 continue;
             }
-            system.save_user_profile(queue, instance, profile);
+            (void)system.save_user_profile(queue, instance, profile);
             installed << QString::fromStdString(instance);
         }
 
