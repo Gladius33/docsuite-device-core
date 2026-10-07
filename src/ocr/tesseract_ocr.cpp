@@ -74,7 +74,7 @@ OcrResult TesseractOcr::recognize(
     if (tesseract::ResultIterator* iterator = api.GetIterator(); iterator != nullptr) {
         do {
             std::unique_ptr<char[]> word_text{iterator->GetUTF8Text(tesseract::RIL_WORD)};
-            if (!word_text || *word_text == '\0') {
+            if (!word_text || word_text[0] == '\0') {
                 continue;
             }
 
