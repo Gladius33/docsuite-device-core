@@ -34,7 +34,8 @@ jobs:
             qt6-base-dev \
             libtesseract-dev \
             tesseract-ocr-eng \
-            tesseract-ocr-fra
+            tesseract-ocr-fra \
+            libopencv-dev
 
       - name: Configure
         run: >-
@@ -44,6 +45,7 @@ jobs:
           -DDOCSUITE_BUILD_SERVICE=ON
           -DDOCSUITE_BUILD_TESTS=ON
           -DDOCSUITE_ENABLE_OCR=ON
+          -DDOCSUITE_ENABLE_OPENCV=ON
 
       - name: Build
         run: cmake --build build --parallel 2
