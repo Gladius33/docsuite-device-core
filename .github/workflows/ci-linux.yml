@@ -53,6 +53,24 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Direct eSCL integration test
+        run: |
+          python3 tests/escl_mock_server.py 18080 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          sleep 0.5
+          ./build/apps/cli/docsuite-device-cli \
+            scan 'escl:http://127.0.0.1:18080' build/escl-mock.pnm 300 color
+          python3 - <<'PY'
+          from pathlib import Path
+          data = Path('build/escl-mock.pnm').read_bytes()
+          assert data.startswith(b'P6\n4 3\n255\n'), data[:64]
+          assert len(data) >= len(b'P6\n4 3\n255\n') + 4 * 3 * 3
+          print('Direct eSCL mock scan: OK')
+          PY
+          kill "$SERVER_PID"
+          trap - EXIT
+
       - name: Build Debian package
         if: matrix.build_type == 'Release'
         run: cmake --build build --target package
