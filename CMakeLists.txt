@@ -86,6 +86,8 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/devices_page.hpp
         apps/desktop/scan_page.cpp
         apps/desktop/scan_page.hpp
+        apps/desktop/copy_page.cpp
+        apps/desktop/copy_page.hpp
         apps/desktop/print_page.cpp
         apps/desktop/print_page.hpp
         apps/desktop/pdf_export.cpp
