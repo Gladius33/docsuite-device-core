@@ -23,6 +23,8 @@ class QScrollArea;
 
 namespace docsuite::desktop {
 
+class SelectionPreview;
+
 class DocumentPage final : public QWidget {
 public:
     explicit DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* parent = nullptr);
@@ -36,6 +38,7 @@ private:
     void clear_pages();
     void run_ocr_selected();
     void transform_selected(const std::string& operation);
+    void crop_selection();
     void export_pdf();
     void update_list();
     void update_preview();
@@ -57,6 +60,7 @@ private:
     QPushButton* up_{nullptr};
     QPushButton* down_{nullptr};
     QPushButton* auto_crop_{nullptr};
+    QPushButton* crop_selection_{nullptr};
     QPushButton* enhance_{nullptr};
     QPushButton* binarize_{nullptr};
     QPushButton* deskew_{nullptr};
@@ -65,7 +69,7 @@ private:
     QPushButton* clear_{nullptr};
     QListWidget* pages_list_{nullptr};
     QScrollArea* preview_scroll_{nullptr};
-    QLabel* preview_{nullptr};
+    SelectionPreview* preview_{nullptr};
     QLabel* status_{nullptr};
 };
 
