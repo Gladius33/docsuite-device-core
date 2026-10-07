@@ -54,10 +54,16 @@ set_target_properties(docsuite-device-cli PROPERTIES
 )
 
 if(DOCSUITE_BUILD_DESKTOP)
-    find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent)
     qt_standard_project_setup()
     qt_add_executable(docsuite-device-center apps/desktop/main.cpp)
-    target_link_libraries(docsuite-device-center PRIVATE DocSuite::DeviceCore Qt6::Widgets)
+    target_link_libraries(
+        docsuite-device-center
+        PRIVATE
+            DocSuite::DeviceCore
+            Qt6::Widgets
+            Qt6::Concurrent
+    )
     set_target_properties(docsuite-device-center PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/desktop
     )
