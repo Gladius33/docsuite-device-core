@@ -9,10 +9,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace docsuite {
@@ -36,12 +39,7 @@ public:
 
 class SaneHandleGuard {
 public:
-    explicit SaneHandleGuard(const std::string& name) {
-        const SANE_Status status = sane_open(name.c_str(), &handle_);
-        if (status != SANE_STATUS_GOOD) {
-            throw std::runtime_error("Unable to open scanner '" + name + "': " + sane_strstatus(status));
-        }
-    }
+    explicit SaneHandleGuard(const SANE_Handle handle) : handle_{handle} {}
 
     ~SaneHandleGuard() {
         if (handle_ != nullptr) {
@@ -57,6 +55,103 @@ public:
 private:
     SANE_Handle handle_{nullptr};
 };
+
+[[nodiscard]] std::string lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+[[nodiscard]] std::string model_token_with_digit(const std::string& text) {
+    std::string token;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        const unsigned char ch = i < text.size()
+            ? static_cast<unsigned char>(text[i])
+            : static_cast<unsigned char>(' ');
+
+        if (std::isalnum(ch) != 0) {
+            token.push_back(static_cast<char>(std::tolower(ch)));
+            continue;
+        }
+
+        if (token.size() >= 4U &&
+            std::any_of(token.begin(), token.end(), [](const unsigned char value) {
+                return std::isdigit(value) != 0;
+            })) {
+            return token;
+        }
+        token.clear();
+    }
+    return {};
+}
+
+[[nodiscard]] bool same_device_identity(
+    const std::string& requested,
+    const SANE_Device& device) {
+
+    const std::string requested_token = model_token_with_digit(requested);
+    const std::string candidate_text =
+        std::string{device.name != nullptr ? device.name : ""} + " " +
+        std::string{device.vendor != nullptr ? device.vendor : ""} + " " +
+        std::string{device.model != nullptr ? device.model : ""};
+    const std::string candidate_token = model_token_with_digit(candidate_text);
+
+    if (!requested_token.empty() && requested_token == candidate_token) {
+        return true;
+    }
+
+    const auto lowered_requested = lower_copy(requested);
+    const auto lowered_candidate = lower_copy(candidate_text);
+    return lowered_requested.size() >= 8U &&
+        (lowered_candidate.find(lowered_requested) != std::string::npos ||
+         lowered_requested.find(lowered_candidate) != std::string::npos);
+}
+
+[[nodiscard]] std::vector<std::string> scanner_candidates(const std::string& requested) {
+    std::vector<std::string> result{requested};
+
+    const SANE_Device** devices = nullptr;
+    if (sane_get_devices(&devices, SANE_FALSE) != SANE_STATUS_GOOD || devices == nullptr) {
+        return result;
+    }
+
+    for (std::size_t i = 0; devices[i] != nullptr; ++i) {
+        const SANE_Device& device = *devices[i];
+        if (device.name == nullptr) {
+            continue;
+        }
+        const std::string name = device.name;
+        if (name != requested && same_device_identity(requested, device)) {
+            result.push_back(name);
+        }
+    }
+
+    return result;
+}
+
+[[nodiscard]] SANE_Handle open_scanner_resilient(const std::string& requested) {
+    SANE_Status last_status = SANE_STATUS_INVAL;
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const auto candidates = scanner_candidates(requested);
+        for (const auto& candidate : candidates) {
+            SANE_Handle handle = nullptr;
+            last_status = sane_open(candidate.c_str(), &handle);
+            if (last_status == SANE_STATUS_GOOD && handle != nullptr) {
+                return handle;
+            }
+        }
+
+        if (attempt < 2) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{250});
+        }
+    }
+
+    throw std::runtime_error(
+        "Unable to open scanner '" + requested + "' after rediscovery/retry: " +
+        sane_strstatus(last_status));
+}
 
 [[nodiscard]] int option_count(const SANE_Handle handle) {
     SANE_Int count = 0;
@@ -79,10 +174,42 @@ private:
     return -1;
 }
 
+[[nodiscard]] std::string constrained_string_value(
+    const SANE_Option_Descriptor& descriptor,
+    const std::string& requested) {
+
+    if (descriptor.constraint_type != SANE_CONSTRAINT_STRING_LIST ||
+        descriptor.constraint.string_list == nullptr) {
+        return requested;
+    }
+
+    const std::string lowered_requested = lower_copy(requested);
+    for (std::size_t i = 0; descriptor.constraint.string_list[i] != nullptr; ++i) {
+        const std::string supported = descriptor.constraint.string_list[i];
+        if (lower_copy(supported) == lowered_requested) {
+            return supported;
+        }
+    }
+
+    if (lowered_requested == "gray" || lowered_requested == "grey" ||
+        lowered_requested == "grayscale" || lowered_requested == "greyscale") {
+        for (std::size_t i = 0; descriptor.constraint.string_list[i] != nullptr; ++i) {
+            const std::string supported = descriptor.constraint.string_list[i];
+            const std::string lowered = lower_copy(supported);
+            if (lowered.find("gray") != std::string::npos ||
+                lowered.find("grey") != std::string::npos) {
+                return supported;
+            }
+        }
+    }
+
+    return requested;
+}
+
 void set_string_option(
     const SANE_Handle handle,
     const std::string_view name,
-    const std::string& value,
+    const std::string& requested_value,
     const bool required) {
 
     const int index = find_option(handle, name);
@@ -102,6 +229,7 @@ void set_string_option(
         return;
     }
 
+    const std::string value = constrained_string_value(*descriptor, requested_value);
     std::vector<SANE_Char> buffer(static_cast<std::size_t>(std::max(descriptor->size, 1)));
     std::strncpy(buffer.data(), value.c_str(), buffer.size() - 1U);
     buffer.back() = '\0';
@@ -200,7 +328,7 @@ ScanFrame SaneScanBackend::scan(
     const ScanSettings& settings) const {
 
     SaneSession session;
-    SaneHandleGuard scanner{scanner_name};
+    SaneHandleGuard scanner{open_scanner_resilient(scanner_name)};
     const SANE_Handle handle = scanner.get();
 
     set_string_option(handle, SANE_NAME_SCAN_SOURCE, settings.source, false);
