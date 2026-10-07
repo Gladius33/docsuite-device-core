@@ -69,6 +69,19 @@ int main() {
     assert(trace.events.size() == 1U);
     assert(trace.submit_to_accept.count() == 12);
 
+    docsuite::ScanSettings scan_settings{};
+    assert(scan_settings.dpi == 300);
+    assert(scan_settings.mode == "Color");
+    assert(scan_settings.source == "Flatbed");
+
+    docsuite::ScanFrame frame{};
+    frame.width = 2;
+    frame.height = 1;
+    frame.dpi = 300;
+    frame.format = docsuite::ScanPixelFormat::rgb24;
+    frame.pixels = {255, 0, 0, 0, 255, 0};
+    assert(frame.pixels.size() == 6U);
+
     std::cout << "DocSuite core smoke tests passed\n";
     return 0;
 }
