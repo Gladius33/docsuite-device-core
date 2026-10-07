@@ -76,8 +76,14 @@ if(DOCSUITE_BUILD_DESKTOP)
     qt_add_executable(
         docsuite-device-center
         apps/desktop/main.cpp
-        apps/desktop/device_center_window.cpp
-        apps/desktop/device_center_window.hpp
+        apps/desktop/main_window.cpp
+        apps/desktop/main_window.hpp
+        apps/desktop/devices_page.cpp
+        apps/desktop/devices_page.hpp
+        apps/desktop/scan_page.cpp
+        apps/desktop/scan_page.hpp
+        apps/desktop/print_page.cpp
+        apps/desktop/print_page.hpp
         apps/desktop/pdf_export.cpp
         apps/desktop/pdf_export.hpp
     )
