@@ -4,6 +4,7 @@
 
 #include "document_page.hpp"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -26,6 +27,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace docsuite::desktop {
 namespace {
@@ -72,6 +74,20 @@ void populate_strings(QComboBox* combo, const std::vector<std::string>& values) 
     combo->setEnabled(!values.empty());
 }
 
+[[nodiscard]] ScanFrame automatic_cleanup(ScanFrame frame, const bool deskew_enabled) {
+    ImageProcessor processor;
+    if (deskew_enabled && processor.deskew_available()) {
+        frame = processor.deskew(frame);
+    }
+    const ImageRect content = processor.detect_content(frame);
+    const bool useful_crop = content.x > 0 || content.y > 0 ||
+        content.width < frame.width || content.height < frame.height;
+    if (useful_crop) {
+        frame = processor.crop(frame, content);
+    }
+    return frame;
+}
+
 } // namespace
 
 DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
@@ -86,10 +102,17 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     mode_ = new QComboBox(settings);
     dpi_ = new QComboBox(settings);
     source_ = new QComboBox(settings);
+    auto_process_ = new QCheckBox(QStringLiteral("Deskew + crop automatically"), settings);
+    auto_process_->setChecked(true);
+    skip_blank_ = new QCheckBox(QStringLiteral("Skip blank pages"), settings);
+    skip_blank_->setChecked(true);
+
     form->addRow(QStringLiteral("Scanner"), scanner_);
     form->addRow(QStringLiteral("Mode"), mode_);
     form->addRow(QStringLiteral("Resolution"), dpi_);
     form->addRow(QStringLiteral("Source"), source_);
+    form->addRow(QStringLiteral("Auto cleanup"), auto_process_);
+    form->addRow(QStringLiteral("Blank pages"), skip_blank_);
     settings_layout->addLayout(form, 1);
 
     auto* acquisition_buttons = new QVBoxLayout();
@@ -121,9 +144,25 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     edit_row->addWidget(clear_);
     left_layout->addLayout(edit_row);
 
-    ocr_ = new QPushButton(QStringLiteral("OCR selected page (fra+eng)"), left);
+    auto* process_group = new QGroupBox(QStringLiteral("Selected page processing"), left);
+    auto* process_layout = new QVBoxLayout(process_group);
+    auto_crop_ = new QPushButton(QStringLiteral("Auto crop content"), process_group);
+    enhance_ = new QPushButton(QStringLiteral("Enhance document contrast"), process_group);
+    binarize_ = new QPushButton(QStringLiteral("Black && white document"), process_group);
+    deskew_ = new QPushButton(QStringLiteral("Automatic deskew"), process_group);
+    deskew_->setEnabled(processor_.deskew_available());
+    if (!processor_.deskew_available()) {
+        deskew_->setToolTip(QStringLiteral("Deskew is available when DocSuite is built with OpenCV."));
+    }
+    process_layout->addWidget(auto_crop_);
+    process_layout->addWidget(enhance_);
+    process_layout->addWidget(binarize_);
+    process_layout->addWidget(deskew_);
+    left_layout->addWidget(process_group);
+
+    ocr_button_ = new QPushButton(QStringLiteral("OCR selected page (fra+eng)"), left);
     export_ = new QPushButton(QStringLiteral("Export multipage PDF"), left);
-    left_layout->addWidget(ocr_);
+    left_layout->addWidget(ocr_button_);
     left_layout->addWidget(export_);
 
     preview_scroll_ = new QScrollArea(splitter);
@@ -148,7 +187,11 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     connect(up_, &QPushButton::clicked, this, [this]() { move_selected(-1); });
     connect(down_, &QPushButton::clicked, this, [this]() { move_selected(1); });
     connect(clear_, &QPushButton::clicked, this, [this]() { clear_pages(); });
-    connect(ocr_, &QPushButton::clicked, this, [this]() { run_ocr_selected(); });
+    connect(auto_crop_, &QPushButton::clicked, this, [this]() { transform_selected("crop"); });
+    connect(enhance_, &QPushButton::clicked, this, [this]() { transform_selected("enhance"); });
+    connect(binarize_, &QPushButton::clicked, this, [this]() { transform_selected("binarize"); });
+    connect(deskew_, &QPushButton::clicked, this, [this]() { transform_selected("deskew"); });
+    connect(ocr_button_, &QPushButton::clicked, this, [this]() { run_ocr_selected(); });
     connect(export_, &QPushButton::clicked, this, [this]() { export_pdf(); });
     connect(scanner_, &QComboBox::currentIndexChanged, this,
         [this](int) { refresh_capabilities(); });
@@ -233,9 +276,11 @@ void DocumentPage::refresh_capabilities() {
                     dpi_->setEnabled(!caps.resolutions_dpi.empty());
                 }
                 status_->setText(
-                    QStringLiteral("Capabilities loaded — max bed %1 × %2 mm")
+                    QStringLiteral("Capabilities loaded — max bed %1 × %2 mm — deskew %3")
                         .arg(caps.max_width_mm, 0, 'f', 1)
-                        .arg(caps.max_height_mm, 0, 'f', 1));
+                        .arg(caps.max_height_mm, 0, 'f', 1)
+                        .arg(processor_.deskew_available() ? QStringLiteral("available")
+                                                          : QStringLiteral("unavailable")));
             } catch (const std::exception& error) {
                 status_->setText(
                     QStringLiteral("Scanner capability error: %1")
@@ -268,6 +313,10 @@ void DocumentPage::add_page() {
         settings.source = "Flatbed";
     }
 
+    const bool auto_process = auto_process_->isChecked();
+    const bool skip_blank = skip_blank_->isChecked();
+    const bool can_deskew = processor_.deskew_available();
+
     add_->setEnabled(false);
     refresh_->setEnabled(false);
     status_->setText(QStringLiteral("Scanning page %1…").arg(pages_.size() + 1U));
@@ -278,25 +327,29 @@ void DocumentPage::add_page() {
         [this, watcher]() {
             try {
                 const auto frame = watcher->result();
-                QImage image = image_from_frame(*frame);
-                if (image.isNull()) {
-                    throw std::runtime_error("Scanner returned an empty document page");
+                if (!frame) {
+                    status_->setText(QStringLiteral("Blank page detected — page skipped"));
+                } else {
+                    QImage image = image_from_frame(*frame);
+                    if (image.isNull()) {
+                        throw std::runtime_error("Scanner returned an empty document page");
+                    }
+                    pages_.push_back(PdfScanPage{
+                        .image = std::move(image),
+                        .dpi = frame->dpi > 0 ? frame->dpi : 300,
+                        .ocr = std::nullopt,
+                    });
+                    update_list();
+                    pages_list_->setCurrentRow(static_cast<int>(pages_.size()) - 1);
+                    status_->setText(
+                        QStringLiteral("Page %1 added — %2 × %3 px")
+                            .arg(pages_.size())
+                            .arg(frame->width)
+                            .arg(frame->height));
                 }
-                pages_.push_back(PdfScanPage{
-                    .image = std::move(image),
-                    .dpi = frame->dpi > 0 ? frame->dpi : 300,
-                    .ocr = std::nullopt,
-                });
-                update_list();
-                pages_list_->setCurrentRow(static_cast<int>(pages_.size()) - 1);
-                status_->setText(
-                    QStringLiteral("Page %1 added — %2 × %3 px")
-                        .arg(pages_.size())
-                        .arg(frame->width)
-                        .arg(frame->height));
             } catch (const std::exception& error) {
                 status_->setText(
-                    QStringLiteral("Scan error: %1").arg(QString::fromUtf8(error.what())));
+                    QStringLiteral("Scan/process error: %1").arg(QString::fromUtf8(error.what())));
             }
             add_->setEnabled(scanner_->count() > 0);
             refresh_->setEnabled(true);
@@ -304,9 +357,18 @@ void DocumentPage::add_page() {
         });
 
     const std::string name = scanner.toStdString();
-    watcher->setFuture(QtConcurrent::run([manager = manager_, name, settings]() {
-        return std::make_shared<ScanFrame>(manager->scan_backend().scan(name, settings));
-    }));
+    watcher->setFuture(QtConcurrent::run(
+        [manager = manager_, name, settings, auto_process, skip_blank, can_deskew]() -> FramePtr {
+            ScanFrame frame = manager->scan_backend().scan(name, settings);
+            ImageProcessor processor;
+            if (skip_blank && processor.is_blank(frame)) {
+                return {};
+            }
+            if (auto_process) {
+                frame = automatic_cleanup(std::move(frame), can_deskew);
+            }
+            return std::make_shared<ScanFrame>(std::move(frame));
+        }));
 }
 
 void DocumentPage::delete_selected() {
@@ -340,11 +402,11 @@ void DocumentPage::clear_pages() {
 
 void DocumentPage::run_ocr_selected() {
     const int row = pages_list_->currentRow();
-    if (row < 0 || row >= static_cast<int>(pages_.size()) || !ocr_.available()) {
+    if (row < 0 || row >= static_cast<int>(pages_.size()) || !ocr_engine_.available()) {
         return;
     }
 
-    ocr_->setEnabled(false);
+    ocr_button_->setEnabled(false);
     status_->setText(QStringLiteral("OCR page %1…").arg(row + 1));
     const ScanFrame frame = frame_from_image(
         pages_[static_cast<std::size_t>(row)].image,
@@ -367,11 +429,86 @@ void DocumentPage::run_ocr_selected() {
                 status_->setText(
                     QStringLiteral("OCR error: %1").arg(QString::fromUtf8(error.what())));
             }
-            ocr_->setEnabled(ocr_.available() && !pages_.empty());
+            ocr_button_->setEnabled(ocr_engine_.available() && !pages_.empty());
             watcher->deleteLater();
         });
-    watcher->setFuture(QtConcurrent::run([ocr = ocr_, frame]() {
-        return ocr.recognize(frame, "fra+eng");
+    watcher->setFuture(QtConcurrent::run([frame]() {
+        TesseractOcr engine;
+        return engine.recognize(frame, "fra+eng");
+    }));
+}
+
+void DocumentPage::transform_selected(const std::string& operation) {
+    const int row = pages_list_->currentRow();
+    if (row < 0 || row >= static_cast<int>(pages_.size())) {
+        return;
+    }
+    if (operation == "deskew" && !processor_.deskew_available()) {
+        status_->setText(QStringLiteral("Deskew requires an OpenCV-enabled build"));
+        return;
+    }
+
+    const ScanFrame input = frame_from_image(
+        pages_[static_cast<std::size_t>(row)].image,
+        pages_[static_cast<std::size_t>(row)].dpi);
+
+    for (auto* button : {auto_crop_, enhance_, binarize_, deskew_, ocr_button_}) {
+        button->setEnabled(false);
+    }
+    status_->setText(
+        QStringLiteral("Processing page %1: %2…")
+            .arg(row + 1)
+            .arg(QString::fromStdString(operation)));
+
+    using FramePtr = std::shared_ptr<ScanFrame>;
+    auto* watcher = new QFutureWatcher<FramePtr>(this);
+    connect(watcher, &QFutureWatcher<FramePtr>::finished, this,
+        [this, watcher, row, operation]() {
+            try {
+                const auto frame = watcher->result();
+                if (!frame) {
+                    throw std::runtime_error("Image processor returned no frame");
+                }
+                if (row < static_cast<int>(pages_.size())) {
+                    QImage image = image_from_frame(*frame);
+                    if (image.isNull()) {
+                        throw std::runtime_error("Processed frame is empty");
+                    }
+                    auto& page = pages_[static_cast<std::size_t>(row)];
+                    page.image = std::move(image);
+                    page.dpi = frame->dpi > 0 ? frame->dpi : page.dpi;
+                    page.ocr.reset();
+                    update_list();
+                    pages_list_->setCurrentRow(row);
+                    status_->setText(
+                        QStringLiteral("Page %1 processed (%2) — rerun OCR if needed")
+                            .arg(row + 1)
+                            .arg(QString::fromStdString(operation)));
+                }
+            } catch (const std::exception& error) {
+                status_->setText(
+                    QStringLiteral("Image processing error: %1")
+                        .arg(QString::fromUtf8(error.what())));
+            }
+            update_list();
+            watcher->deleteLater();
+        });
+
+    watcher->setFuture(QtConcurrent::run([input, operation]() -> FramePtr {
+        ImageProcessor processor;
+        ScanFrame output;
+        if (operation == "crop") {
+            output = processor.crop(input, processor.detect_content(input));
+        } else if (operation == "enhance") {
+            output = processor.enhance_document(input, false);
+        } else if (operation == "binarize") {
+            output = processor.enhance_document(input, true);
+        } else if (operation == "deskew") {
+            output = processor.deskew(input);
+        } else {
+            throw std::runtime_error("Unknown document transform: " + operation);
+        }
+        return std::make_shared<ScanFrame>(std::move(output));
     }));
 }
 
@@ -433,7 +570,11 @@ void DocumentPage::update_list() {
     down_->setEnabled(has_pages);
     clear_->setEnabled(has_pages);
     export_->setEnabled(has_pages);
-    ocr_->setEnabled(has_pages && ocr_.available());
+    auto_crop_->setEnabled(has_pages);
+    enhance_->setEnabled(has_pages);
+    binarize_->setEnabled(has_pages);
+    deskew_->setEnabled(has_pages && processor_.deskew_available());
+    ocr_button_->setEnabled(has_pages && ocr_engine_.available());
     update_preview();
 }
 
