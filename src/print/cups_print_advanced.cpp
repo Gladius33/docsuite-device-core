@@ -3,9 +3,11 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "docsuite/print/cups_print_backend.hpp"
+#include "docsuite/print/print_validation.hpp"
 
 #include <cups/cups.h>
 
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -22,13 +24,37 @@ void add_nonempty_option(
     }
 }
 
+[[nodiscard]] std::string join_errors(const std::vector<std::string>& errors) {
+    std::ostringstream message;
+    message << "Print preflight failed";
+    for (const auto& error : errors) {
+        message << "; " << error;
+    }
+    return message.str();
+}
+
 } // namespace
+
+PrintPreflightResult CupsPrintBackend::preflight(
+    const std::string& printer,
+    const PrintProfile& profile,
+    const bool force_refresh) const {
+
+    return validate_print_profile(
+        capabilities(printer, force_refresh),
+        profile);
+}
 
 int CupsPrintBackend::print_file_advanced(
     const std::string& printer,
     const std::string& path,
     const std::string& title,
     const PrintProfile& profile) const {
+
+    const auto validation = preflight(printer, profile, false);
+    if (!validation.ok) {
+        throw std::runtime_error(join_errors(validation.errors));
+    }
 
     cups_option_t* options = nullptr;
     int option_count = 0;
