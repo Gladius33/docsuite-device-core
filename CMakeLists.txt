@@ -29,6 +29,7 @@ add_library(docsuite_device_core
     src/image/image_processor.cpp
     src/ocr/tesseract_ocr.cpp
     src/print/cups_print_backend.cpp
+    src/print/direct_ipp_probe.cpp
     src/print/cups_print_advanced.cpp
     src/print/print_validation.cpp
     src/print/job_manager.cpp
@@ -126,9 +127,22 @@ if(DOCSUITE_BUILD_DESKTOP)
 endif()
 
 if(BUILD_TESTING AND DOCSUITE_BUILD_TESTS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
     add_executable(docsuite-core-tests tests/core_tests.cpp)
     target_link_libraries(docsuite-core-tests PRIVATE DocSuite::DeviceCore)
     add_test(NAME docsuite-core-tests COMMAND docsuite-core-tests)
+
+    add_executable(docsuite-direct-ipp-probe-test tests/direct_ipp_probe_test.cpp)
+    target_link_libraries(docsuite-direct-ipp-probe-test PRIVATE DocSuite::DeviceCore)
+    add_test(
+        NAME docsuite-direct-ipp-integration
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_direct_ipp_integration.py
+            $<TARGET_FILE:docsuite-direct-ipp-probe-test>
+    )
+    set_tests_properties(docsuite-direct-ipp-integration PROPERTIES TIMEOUT 20)
 endif()
 
 set(CPACK_PACKAGE_NAME "docsuite-device-core")
