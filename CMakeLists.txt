@@ -104,6 +104,8 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/device_service_gateway.hpp
         apps/desktop/devices_page.cpp
         apps/desktop/devices_page.hpp
+        apps/desktop/diagnostics_page.cpp
+        apps/desktop/diagnostics_page.hpp
         apps/desktop/scan_page.cpp
         apps/desktop/scan_page.hpp
         apps/desktop/document_page.cpp
