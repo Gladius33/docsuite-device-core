@@ -7,7 +7,6 @@
 
 #include <QCoreApplication>
 #include <QDir>
-#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -15,8 +14,13 @@
 #include <QLocalSocket>
 #include <QStandardPaths>
 
+#include <pwd.h>
+#include <unistd.h>
+
 #include <exception>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -30,6 +34,20 @@ namespace {
         runtime = QDir::tempPath();
     }
     return QDir(runtime).filePath(QStringLiteral("docsuite-device-core.sock"));
+}
+
+[[nodiscard]] std::string current_username() {
+    if (const passwd* entry = getpwuid(geteuid()); entry != nullptr && entry->pw_name != nullptr) {
+        return entry->pw_name;
+    }
+    return {};
+}
+
+[[nodiscard]] bool terminal_job(const docsuite::PrintJobState state) noexcept {
+    return state == docsuite::PrintJobState::completed ||
+        state == docsuite::PrintJobState::canceled ||
+        state == docsuite::PrintJobState::aborted ||
+        state == docsuite::PrintJobState::stopped;
 }
 
 [[nodiscard]] QJsonArray strings(const std::vector<std::string>& values) {
@@ -185,7 +203,14 @@ private:
 
         try {
             if (method == QStringLiteral("ping")) {
-                return response(id, true, QJsonObject{{QStringLiteral("service"), QStringLiteral("docsuite-device-service")}, {QStringLiteral("version"), QStringLiteral("0.4.0")}}, {});
+                return response(
+                    id,
+                    true,
+                    QJsonObject{
+                        {QStringLiteral("service"), QStringLiteral("docsuite-device-service")},
+                        {QStringLiteral("version"), QStringLiteral("0.5.0")},
+                    },
+                    {});
             }
 
             if (method == QStringLiteral("device.list")) {
@@ -209,18 +234,33 @@ private:
                         {QStringLiteral("backend"), QString::fromStdString(scanner.backend)},
                     });
                 }
-                return response(id, true, QJsonObject{{QStringLiteral("printers"), printers}, {QStringLiteral("scanners"), scanners}}, {});
+                return response(
+                    id,
+                    true,
+                    QJsonObject{
+                        {QStringLiteral("printers"), printers},
+                        {QStringLiteral("scanners"), scanners},
+                    },
+                    {});
             }
 
             if (method == QStringLiteral("printer.status")) {
                 const std::string printer = required_string(params, QStringLiteral("printer"));
-                return response(id, true, printer_status_json(manager_->print_backend().status(printer)), {});
+                return response(
+                    id,
+                    true,
+                    printer_status_json(manager_->print_backend().status(printer)),
+                    {});
             }
 
             if (method == QStringLiteral("printer.capabilities")) {
                 const std::string printer = required_string(params, QStringLiteral("printer"));
                 const bool refresh = params.value(QStringLiteral("refresh")).toBool(false);
-                return response(id, true, capabilities_json(manager_->print_backend().capabilities(printer, refresh)), {});
+                return response(
+                    id,
+                    true,
+                    capabilities_json(manager_->print_backend().capabilities(printer, refresh)),
+                    {});
             }
 
             if (method == QStringLiteral("printer.jobs")) {
@@ -230,12 +270,50 @@ private:
                 for (const auto& job : manager_->job_manager().list_jobs(printer, completed)) {
                     jobs.append(job_json(job));
                 }
-                return response(id, true, QJsonObject{{QStringLiteral("jobs"), jobs}}, {});
+                return response(
+                    id,
+                    true,
+                    QJsonObject{{QStringLiteral("jobs"), jobs}},
+                    {});
+            }
+
+            if (method == QStringLiteral("printer.cancel_job")) {
+                const std::string printer = required_string(params, QStringLiteral("printer"));
+                const int job_id = required_positive_int(params, QStringLiteral("job_id"));
+                const auto job = manager_->job_manager().job(printer, job_id);
+                if (!job.has_value()) {
+                    throw std::runtime_error("print job not found");
+                }
+
+                const std::string user = current_username();
+                if (user.empty() || job->user.empty() || job->user != user) {
+                    throw std::runtime_error("refusing to cancel a print job not owned by the local user");
+                }
+                if (terminal_job(job->state)) {
+                    throw std::runtime_error("print job is already in a terminal state");
+                }
+                if (!manager_->job_manager().cancel(printer, job_id)) {
+                    throw std::runtime_error("CUPS refused print job cancellation");
+                }
+
+                return response(
+                    id,
+                    true,
+                    QJsonObject{
+                        {QStringLiteral("job_id"), job_id},
+                        {QStringLiteral("printer"), QString::fromStdString(printer)},
+                        {QStringLiteral("canceled"), true},
+                    },
+                    {});
             }
 
             if (method == QStringLiteral("scanner.capabilities")) {
                 const std::string scanner = required_string(params, QStringLiteral("scanner"));
-                return response(id, true, scanner_capabilities_json(manager_->scan_backend().capabilities(scanner)), {});
+                return response(
+                    id,
+                    true,
+                    scanner_capabilities_json(manager_->scan_backend().capabilities(scanner)),
+                    {});
             }
 
             return response(id, false, {}, QStringLiteral("unknown method"));
@@ -252,6 +330,20 @@ private:
             throw std::runtime_error("missing required parameter: " + key.toStdString());
         }
         return value.toStdString();
+    }
+
+    [[nodiscard]] static int required_positive_int(
+        const QJsonObject& params,
+        const QString& key) {
+        const QJsonValue value = params.value(key);
+        if (!value.isDouble()) {
+            throw std::runtime_error("missing integer parameter: " + key.toStdString());
+        }
+        const int result = value.toInt(0);
+        if (result <= 0) {
+            throw std::runtime_error("parameter must be positive: " + key.toStdString());
+        }
+        return result;
     }
 
     [[nodiscard]] static QByteArray response(
