@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DocSuite Device Center
+GenericName=Printer and Scanner Center
+Comment=Native IPP printing, SANE scanning, OCR and device diagnostics
+Exec=docsuite-device-center
+Icon=document-print
+Terminal=false
+Categories=Office;Utility;
+Keywords=printer;scanner;scan;print;IPP;SANE;OCR;PDF;
+StartupNotify=true
