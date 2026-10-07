@@ -95,6 +95,48 @@ function createServer(): McpServer {
   );
 
   server.registerTool(
+    'printer_preflight',
+    {
+      description: 'Validate standard print settings without submitting a print job. Detailed mode additionally asks CUPS to evaluate cross-option constraints and can be slower.',
+      inputSchema: z.object({
+        printer: z.string().min(1).max(1024),
+        media: z.string().min(1).max(256).optional().default('iso_a4_210x297mm'),
+        mediaSource: z.string().max(256).optional().default(''),
+        mediaType: z.string().max(256).optional().default(''),
+        colorMode: z.string().min(1).max(256).optional().default('color'),
+        sides: z.string().min(1).max(256).optional().default('one-sided'),
+        quality: z.number().int().min(0).max(100).optional().default(4),
+        copies: z.number().int().min(1).max(9999).optional().default(1),
+        detailed: z.boolean().optional().default(false),
+        refresh: z.boolean().optional().default(false)
+      })
+    },
+    async ({
+      printer,
+      media,
+      mediaSource,
+      mediaType,
+      colorMode,
+      sides,
+      quality,
+      copies,
+      detailed,
+      refresh
+    }) => textResult(await rpc('printer.preflight', {
+      printer,
+      media,
+      media_source: mediaSource,
+      media_type: mediaType,
+      color_mode: colorMode,
+      sides,
+      quality,
+      copies,
+      detailed,
+      refresh
+    }))
+  );
+
+  server.registerTool(
     'printer_jobs',
     {
       description: 'List CUPS jobs for a printer.',
