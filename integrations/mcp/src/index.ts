@@ -30,7 +30,7 @@ function rpc(method: string, params: Record<string, unknown> = {}): Promise<unkn
       else resolve(result);
     };
 
-    socket.setTimeout(15000, () => finish(new Error('DocSuite device service timed out')));
+    socket.setTimeout(30000, () => finish(new Error('DocSuite device service timed out')));
     socket.on('error', error => finish(error));
     socket.on('connect', () => {
       socket.write(JSON.stringify({ id, method, params }) + '\n');
@@ -129,10 +129,25 @@ function createServer(): McpServer {
   server.registerTool(
     'scanner_capabilities',
     {
-      description: 'Read normalized SANE capabilities for a discovered scanner.',
+      description: 'Read normalized scanner capabilities through the DocSuite SANE/eSCL router.',
       inputSchema: z.object({ scanner: z.string().min(1) })
     },
     async ({ scanner }) => textResult(await rpc('scanner.capabilities', { scanner }))
+  );
+
+  server.registerTool(
+    'scanner_scan',
+    {
+      description: 'Acquire one page from a local scanner. The service writes the result only into its private runtime scan directory and returns the generated path.',
+      inputSchema: z.object({
+        scanner: z.string().min(1),
+        dpi: z.number().int().min(75).max(1200).optional().default(300),
+        mode: z.enum(['Color', 'Gray', 'Lineart']).optional().default('Color'),
+        source: z.string().min(1).max(128).optional().default('Flatbed')
+      })
+    },
+    async ({ scanner, dpi, mode, source }) =>
+      textResult(await rpc('scanner.scan', { scanner, dpi, mode, source }))
   );
 
   return server;
