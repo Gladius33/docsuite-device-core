@@ -12,6 +12,7 @@
 #include <QString>
 
 #include <memory>
+#include <optional>
 
 class QComboBox;
 class QLabel;
@@ -81,6 +82,7 @@ private:
     QPlainTextEdit* scan_ocr_text_{nullptr};
     std::shared_ptr<ScanFrame> scan_frame_backing_{};
     QImage scan_image_data_{};
+    std::optional<OcrResult> scan_ocr_result_{};
     int scan_dpi_value_{300};
 
     QComboBox* print_printer_{nullptr};
