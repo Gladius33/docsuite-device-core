@@ -71,7 +71,7 @@ jobs:
           kill "$SERVER_PID"
           trap - EXIT
 
-      - name: Local service integration test
+      - name: Local service integration and safety test
         run: |
           export XDG_RUNTIME_DIR="$PWD/build/runtime"
           mkdir -p "$XDG_RUNTIME_DIR"
@@ -99,6 +99,7 @@ jobs:
           while not os.path.exists(socket_path) and time.time() < deadline:
               time.sleep(0.05)
           assert os.path.exists(socket_path), socket_path
+          assert stat.S_IMODE(os.stat(socket_path).st_mode) & 0o077 == 0, oct(os.stat(socket_path).st_mode)
 
           def rpc(request):
               with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -117,17 +118,48 @@ jobs:
           assert ping['result']['service'] == 'docsuite-device-service'
           assert ping['result']['version'] == '0.5.0'
 
-          scan = rpc({
+          invalid_dpi = rpc({
               'id': 2,
+              'method': 'scanner.scan',
+              'params': {
+                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'dpi': 72,
+                  'mode': 'Color',
+              },
+          })
+          assert invalid_dpi['ok'] is False, invalid_dpi
+          assert '75 and 1200' in invalid_dpi['error'], invalid_dpi
+
+          invalid_mode = rpc({
+              'id': 3,
+              'method': 'scanner.scan',
+              'params': {
+                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'dpi': 300,
+                  'mode': 'RawDeviceCommand',
+              },
+          })
+          assert invalid_mode['ok'] is False, invalid_mode
+          assert 'Color, Gray, or Lineart' in invalid_mode['error'], invalid_mode
+
+          unknown = rpc({'id': 4, 'method': 'system.shell', 'params': {'command': 'id'}})
+          assert unknown['ok'] is False, unknown
+          assert unknown['error'] == 'unknown method', unknown
+
+          requested_escape = '/tmp/docsuite-must-not-write-here.pnm'
+          Path(requested_escape).unlink(missing_ok=True)
+          scan = rpc({
+              'id': 5,
               'method': 'scanner.scan',
               'params': {
                   'scanner': 'escl:http://127.0.0.1:18081',
                   'dpi': 300,
                   'mode': 'Color',
                   'source': 'Flatbed',
+                  'path': requested_escape,
               },
           })
-          assert scan['id'] == 2, scan
+          assert scan['id'] == 5, scan
           assert scan['ok'] is True, scan
           result = scan['result']
           assert result['width'] == 4, result
@@ -138,9 +170,12 @@ jobs:
           assert output.is_file(), output
           expected_root = Path(os.environ['XDG_RUNTIME_DIR']) / 'docsuite-device-core' / 'scans'
           assert output.parent == expected_root, (output, expected_root)
+          assert output != Path(requested_escape)
+          assert not Path(requested_escape).exists()
           assert stat.S_IMODE(output.stat().st_mode) == 0o600, oct(output.stat().st_mode)
+          assert stat.S_IMODE(expected_root.stat().st_mode) == 0o700, oct(expected_root.stat().st_mode)
           assert output.read_bytes().startswith(b'P6\n4 3\n255\n')
-          print('DocSuite Unix socket scanner.scan: OK')
+          print('DocSuite Unix socket scanner.scan safety boundaries: OK')
           PY
 
           kill "$SERVICE_PID" "$SCANNER_PID"
