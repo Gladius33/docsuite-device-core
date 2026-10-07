@@ -107,78 +107,102 @@ QJsonObject DeviceServiceGateway::call(
     const int timeout_ms) const {
 
     if (smoke_test_mode()) {
-        throw std::runtime_error("device service disabled in GUI smoke-test mode");
+        throw std::runtime_error("DocSuite service disabled in GUI smoke-test mode");
     }
+
+    static std::atomic<quint64> next_id{1};
+    const quint64 request_id = next_id.fetch_add(1, std::memory_order_relaxed);
 
     QLocalSocket socket;
-    socket.connectToServer(socket_path());
+    socket.connectToServer(socket_path(), QIODevice::ReadWrite);
     if (!socket.waitForConnected(timeout_ms)) {
-        throw std::runtime_error("device service unavailable");
+        throw std::runtime_error(
+            "DocSuite service unavailable: " + socket.errorString().toStdString());
     }
 
-    static std::atomic<qulonglong> next_id{1};
-    const qulonglong id = next_id.fetch_add(1, std::memory_order_relaxed);
     const QJsonObject request{
-        {QStringLiteral("id"), static_cast<double>(id)},
+        {QStringLiteral("id"), static_cast<qint64>(request_id)},
         {QStringLiteral("method"), method},
         {QStringLiteral("params"), params},
     };
-
-    QByteArray payload = QJsonDocument(request).toJson(QJsonDocument::Compact);
-    payload.append('\n');
-    if (socket.write(payload) != payload.size() || !socket.waitForBytesWritten(timeout_ms)) {
-        throw std::runtime_error("device service request write failed");
+    QByteArray wire = QJsonDocument(request).toJson(QJsonDocument::Compact);
+    wire.append('\n');
+    if (socket.write(wire) != wire.size() || !socket.waitForBytesWritten(timeout_ms)) {
+        throw std::runtime_error("Unable to write request to DocSuite service");
     }
 
+    QByteArray response_bytes;
     QElapsedTimer timer;
     timer.start();
-    QByteArray response;
-    constexpr qsizetype max_response = 1024 * 1024;
-    while (!response.contains('\n')) {
+    while (response_bytes.indexOf('\n') < 0) {
         const int remaining = timeout_ms - static_cast<int>(timer.elapsed());
         if (remaining <= 0 || !socket.waitForReadyRead(remaining)) {
-            throw std::runtime_error("device service response timed out");
+            throw std::runtime_error("Timed out waiting for DocSuite service response");
         }
-        response += socket.readAll();
-        if (response.size() > max_response) {
-            throw std::runtime_error("device service response exceeds 1 MiB");
+        response_bytes.append(socket.readAll());
+        if (response_bytes.size() > 1024 * 1024) {
+            throw std::runtime_error("DocSuite service response exceeded 1 MiB safety limit");
         }
     }
 
-    const int newline = response.indexOf('\n');
-    const QJsonDocument document = QJsonDocument::fromJson(response.left(newline));
-    if (!document.isObject()) {
-        throw std::runtime_error("device service returned invalid JSON");
+    response_bytes.truncate(response_bytes.indexOf('\n'));
+    QJsonParseError parse_error{};
+    const QJsonDocument response_document = QJsonDocument::fromJson(response_bytes, &parse_error);
+    if (parse_error.error != QJsonParseError::NoError || !response_document.isObject()) {
+        throw std::runtime_error("Invalid JSON response from DocSuite service");
     }
-    const QJsonObject object = document.object();
-    if (!object.value(QStringLiteral("ok")).toBool(false)) {
-        const QString message = object.value(QStringLiteral("error")).toString(
-            QStringLiteral("device service request failed"));
-        throw std::runtime_error(message.toStdString());
+
+    const QJsonObject response = response_document.object();
+    if (!response.value(QStringLiteral("ok")).toBool(false)) {
+        throw std::runtime_error(
+            response.value(QStringLiteral("error"))
+                .toString(QStringLiteral("DocSuite service request failed"))
+                .toStdString());
     }
-    return object;
+    if (!response.value(QStringLiteral("result")).isObject()) {
+        throw std::runtime_error("DocSuite service response has no object result");
+    }
+    return response.value(QStringLiteral("result")).toObject();
+}
+
+bool DeviceServiceGateway::service_available() const noexcept {
+    if (smoke_test_mode()) {
+        return false;
+    }
+    try {
+        const auto result = call(QStringLiteral("ping"), {}, 250);
+        return result.value(QStringLiteral("service")).toString() ==
+            QStringLiteral("docsuite-device-service");
+    } catch (...) {
+        return false;
+    }
 }
 
 DeviceSnapshot DeviceServiceGateway::snapshot() const {
     if (smoke_test_mode()) {
         return {};
     }
-
     try {
-        const auto response = call(QStringLiteral("device.list"));
-        const auto result = response.value(QStringLiteral("result")).toObject();
+        const QJsonObject result = call(QStringLiteral("device.list"));
         DeviceSnapshot snapshot;
-        for (const auto& value : result.value(QStringLiteral("printers")).toArray()) {
-            const auto item = value.toObject();
+
+        const QJsonArray printers = result.value(QStringLiteral("printers")).toArray();
+        snapshot.printers.reserve(static_cast<std::size_t>(printers.size()));
+        for (const auto& value : printers) {
+            const QJsonObject item = value.toObject();
             snapshot.printers.push_back(PrinterInfo{
                 .name = item.value(QStringLiteral("name")).toString().toStdString(),
-                .model = item.value(QStringLiteral("model")).toString().toStdString(),
                 .uri = item.value(QStringLiteral("uri")).toString().toStdString(),
+                .model = item.value(QStringLiteral("model")).toString().toStdString(),
                 .is_default = item.value(QStringLiteral("default")).toBool(false),
+                .temporary = false,
             });
         }
-        for (const auto& value : result.value(QStringLiteral("scanners")).toArray()) {
-            const auto item = value.toObject();
+
+        const QJsonArray scanners = result.value(QStringLiteral("scanners")).toArray();
+        snapshot.scanners.reserve(static_cast<std::size_t>(scanners.size()));
+        for (const auto& value : scanners) {
+            const QJsonObject item = value.toObject();
             snapshot.scanners.push_back(ScannerInfo{
                 .name = item.value(QStringLiteral("name")).toString().toStdString(),
                 .vendor = item.value(QStringLiteral("vendor")).toString().toStdString(),
@@ -195,59 +219,57 @@ DeviceSnapshot DeviceServiceGateway::snapshot() const {
 
 PrinterCapabilities DeviceServiceGateway::printer_capabilities(
     const std::string& printer,
-    const bool force_refresh) const {
-
+    const bool refresh) const {
     try {
-        const auto response = call(
+        const QJsonObject result = call(
             QStringLiteral("printer.capabilities"),
             QJsonObject{
                 {QStringLiteral("printer"), QString::fromStdString(printer)},
-                {QStringLiteral("refresh"), force_refresh},
-            },
-            12000);
-        const auto result = response.value(QStringLiteral("result")).toObject();
+                {QStringLiteral("refresh"), refresh},
+            });
         PrinterCapabilities caps;
-        caps.printer = printer;
+        caps.printer = result.value(QStringLiteral("printer")).toString().toStdString();
         caps.source = result.value(QStringLiteral("source")).toString().toStdString();
         caps.color_modes = string_vector(result.value(QStringLiteral("color_modes")));
+        caps.media = string_vector(result.value(QStringLiteral("media")));
+        caps.media_types = string_vector(result.value(QStringLiteral("media_types")));
+        caps.media_sources = string_vector(result.value(QStringLiteral("media_sources")));
         caps.sides = string_vector(result.value(QStringLiteral("sides")));
         caps.qualities = int_vector(result.value(QStringLiteral("qualities")));
         caps.resolutions_dpi = int_vector(result.value(QStringLiteral("resolutions_dpi")));
-        caps.media_sources = string_vector(result.value(QStringLiteral("media_sources")));
-        caps.media_types = string_vector(result.value(QStringLiteral("media_types")));
         caps.document_formats = string_vector(result.value(QStringLiteral("document_formats")));
-        caps.media = string_vector(result.value(QStringLiteral("media")));
         caps.copies_min = result.value(QStringLiteral("copies_min")).toInt(1);
         caps.copies_max = result.value(QStringLiteral("copies_max")).toInt(1);
+        caps.fetched_at = std::chrono::system_clock::now();
         return caps;
     } catch (...) {
-        return fallback_->print_backend().capabilities(printer, force_refresh);
+        return fallback_->print_backend().capabilities(printer, refresh);
     }
 }
 
 PrinterStatus DeviceServiceGateway::printer_status(const std::string& printer) const {
     try {
-        const auto response = call(
+        const QJsonObject result = call(
             QStringLiteral("printer.status"),
-            QJsonObject{{QStringLiteral("printer"), QString::fromStdString(printer)}},
-            8000);
-        const auto result = response.value(QStringLiteral("result")).toObject();
+            QJsonObject{{QStringLiteral("printer"), QString::fromStdString(printer)}});
         PrinterStatus status;
-        status.printer = printer;
+        status.printer = result.value(QStringLiteral("printer")).toString().toStdString();
         status.source = result.value(QStringLiteral("source")).toString().toStdString();
         status.state = device_state(result.value(QStringLiteral("state")).toString());
         status.accepting_jobs = result.value(QStringLiteral("accepting_jobs")).toBool(false);
         status.reasons = string_vector(result.value(QStringLiteral("reasons")));
-        for (const auto& value : result.value(QStringLiteral("supplies")).toArray()) {
-            const auto item = value.toObject();
-            SupplyStatus supply;
+        const QJsonArray supplies = result.value(QStringLiteral("supplies")).toArray();
+        status.supplies.reserve(static_cast<std::size_t>(supplies.size()));
+        for (const auto& value : supplies) {
+            const QJsonObject item = value.toObject();
+            SupplyLevel supply;
             supply.name = item.value(QStringLiteral("name")).toString().toStdString();
             supply.type = item.value(QStringLiteral("type")).toString().toStdString();
-            if (item.contains(QStringLiteral("level_percent")) &&
-                item.value(QStringLiteral("level_percent")).isDouble()) {
-                supply.level_percent = item.value(QStringLiteral("level_percent")).toInt();
+            supply.low_threshold = item.value(QStringLiteral("low_threshold")).toInt(15);
+            const QJsonValue percent = item.value(QStringLiteral("percent"));
+            if (percent.isDouble()) {
+                supply.percent = percent.toInt();
             }
-            supply.low = item.value(QStringLiteral("low")).toBool(false);
             status.supplies.push_back(std::move(supply));
         }
         return status;
@@ -256,48 +278,13 @@ PrinterStatus DeviceServiceGateway::printer_status(const std::string& printer) c
     }
 }
 
-std::vector<PrintJobInfo> DeviceServiceGateway::jobs(
-    const std::string& printer,
-    const bool active_only) const {
-
+ScannerCapabilities DeviceServiceGateway::scanner_capabilities(const std::string& scanner) const {
     try {
-        const auto response = call(
-            QStringLiteral("printer.jobs"),
-            QJsonObject{
-                {QStringLiteral("printer"), QString::fromStdString(printer)},
-                {QStringLiteral("active_only"), active_only},
-            });
-        const auto result = response.value(QStringLiteral("result")).toObject();
-        std::vector<PrintJobInfo> jobs;
-        for (const auto& value : result.value(QStringLiteral("jobs")).toArray()) {
-            const auto item = value.toObject();
-            jobs.push_back(PrintJobInfo{
-                .id = item.value(QStringLiteral("id")).toInt(),
-                .printer = printer,
-                .title = item.value(QStringLiteral("title")).toString().toStdString(),
-                .user = item.value(QStringLiteral("user")).toString().toStdString(),
-                .format = item.value(QStringLiteral("format")).toString().toStdString(),
-                .size_kib = item.value(QStringLiteral("size_kib")).toInt(),
-                .state = job_state(item.value(QStringLiteral("state")).toString()),
-            });
-        }
-        return jobs;
-    } catch (...) {
-        return JobManager{fallback_->print_backend()}.list_jobs(printer, active_only);
-    }
-}
-
-ScannerCapabilities DeviceServiceGateway::scanner_capabilities(
-    const std::string& scanner) const {
-
-    try {
-        const auto response = call(
+        const QJsonObject result = call(
             QStringLiteral("scanner.capabilities"),
-            QJsonObject{{QStringLiteral("scanner"), QString::fromStdString(scanner)}},
-            8000);
-        const auto result = response.value(QStringLiteral("result")).toObject();
+            QJsonObject{{QStringLiteral("scanner"), QString::fromStdString(scanner)}});
         ScannerCapabilities caps;
-        caps.scanner = scanner;
+        caps.scanner = result.value(QStringLiteral("scanner")).toString().toStdString();
         caps.source = result.value(QStringLiteral("source")).toString().toStdString();
         caps.modes = string_vector(result.value(QStringLiteral("modes")));
         caps.resolutions_dpi = int_vector(result.value(QStringLiteral("resolutions_dpi")));
@@ -310,41 +297,58 @@ ScannerCapabilities DeviceServiceGateway::scanner_capabilities(
     }
 }
 
-PrintPreflightResult DeviceServiceGateway::preflight(
+std::vector<PrintJobInfo> DeviceServiceGateway::printer_jobs(
     const std::string& printer,
-    const PrintProfile& profile,
-    const bool detailed) const {
-
+    const bool include_completed) const {
     try {
-        const auto response = call(
-            QStringLiteral("printer.preflight"),
+        const QJsonObject result = call(
+            QStringLiteral("printer.jobs"),
             QJsonObject{
                 {QStringLiteral("printer"), QString::fromStdString(printer)},
-                {QStringLiteral("profile"), profile_json(profile)},
-                {QStringLiteral("detailed"), detailed},
-            },
-            detailed ? 8000 : 3000);
-        const auto result = response.value(QStringLiteral("result")).toObject();
-        PrintPreflightResult check;
-        check.ok = result.value(QStringLiteral("ok")).toBool(false);
-        check.errors = string_vector(result.value(QStringLiteral("errors")));
-        check.warnings = string_vector(result.value(QStringLiteral("warnings")));
-        return check;
+                {QStringLiteral("include_completed"), include_completed},
+            });
+        const QJsonArray jobs = result.value(QStringLiteral("jobs")).toArray();
+        std::vector<PrintJobInfo> output;
+        output.reserve(static_cast<std::size_t>(jobs.size()));
+        for (const auto& value : jobs) {
+            const QJsonObject item = value.toObject();
+            output.push_back(PrintJobInfo{
+                .id = item.value(QStringLiteral("id")).toInt(),
+                .printer = item.value(QStringLiteral("printer")).toString().toStdString(),
+                .title = item.value(QStringLiteral("title")).toString().toStdString(),
+                .user = item.value(QStringLiteral("user")).toString().toStdString(),
+                .format = item.value(QStringLiteral("format")).toString().toStdString(),
+                .state = job_state(item.value(QStringLiteral("state")).toString()),
+                .size_kib = item.value(QStringLiteral("size_kib")).toInt(),
+                .priority = item.value(QStringLiteral("priority")).toInt(),
+            });
+        }
+        return output;
     } catch (...) {
-        const auto caps = fallback_->print_backend().capabilities(printer, false);
-        return validate_print_profile(profile, caps);
+        return fallback_->job_manager().list_jobs(printer, include_completed);
     }
 }
 
-bool DeviceServiceGateway::service_available() const noexcept {
-    if (smoke_test_mode()) {
-        return false;
-    }
+PrintPreflightResult DeviceServiceGateway::printer_preflight(
+    const std::string& printer,
+    const PrintProfile& profile,
+    const bool detailed,
+    const bool refresh) const {
     try {
-        (void)call(QStringLiteral("ping"), {}, 250);
-        return true;
+        QJsonObject params = profile_json(profile);
+        params.insert(QStringLiteral("printer"), QString::fromStdString(printer));
+        params.insert(QStringLiteral("detailed"), detailed);
+        params.insert(QStringLiteral("refresh"), refresh);
+        const QJsonObject result = call(QStringLiteral("printer.preflight"), params);
+        return PrintPreflightResult{
+            .ok = result.value(QStringLiteral("ok")).toBool(false),
+            .errors = string_vector(result.value(QStringLiteral("errors"))),
+            .warnings = string_vector(result.value(QStringLiteral("warnings"))),
+        };
     } catch (...) {
-        return false;
+        return detailed
+            ? fallback_->print_backend().preflight_detailed(printer, profile, refresh)
+            : fallback_->print_backend().preflight(printer, profile, refresh);
     }
 }
 
