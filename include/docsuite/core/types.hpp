@@ -18,6 +18,17 @@ enum class DeviceState {
     offline
 };
 
+enum class PrintJobState {
+    unknown,
+    pending,
+    held,
+    processing,
+    stopped,
+    canceled,
+    aborted,
+    completed
+};
+
 struct PrinterInfo {
     std::string name;
     std::string uri;
@@ -77,6 +88,41 @@ struct PrintProfile {
     std::string color_mode{"color"};
     std::string sides{"one-sided"};
     int quality{4};
+};
+
+struct PrintJobInfo {
+    int id{0};
+    std::string printer;
+    std::string title;
+    std::string user;
+    std::string format;
+    PrintJobState state{PrintJobState::unknown};
+    int size_kib{0};
+    int priority{0};
+    std::chrono::system_clock::time_point created_at{};
+    std::chrono::system_clock::time_point processing_at{};
+    std::chrono::system_clock::time_point completed_at{};
+};
+
+struct JobTimelineEvent {
+    std::string name;
+    PrintJobState state{PrintJobState::unknown};
+    std::chrono::system_clock::time_point at{};
+    std::chrono::milliseconds since_submit{0};
+};
+
+struct PrintJobTrace {
+    int job_id{0};
+    std::string printer;
+    std::string title;
+    std::vector<JobTimelineEvent> events;
+    PrintJobState final_state{PrintJobState::unknown};
+    std::chrono::milliseconds submit_to_accept{0};
+    std::optional<std::chrono::milliseconds> queue_delay;
+    std::optional<std::chrono::milliseconds> processing_duration;
+    std::optional<std::chrono::milliseconds> total_duration;
+    bool timed_out{false};
+    std::string history_path;
 };
 
 } // namespace docsuite
