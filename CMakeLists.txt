@@ -28,6 +28,7 @@ add_library(docsuite_device_core
     src/print/cups_print_backend.cpp
     src/print/job_manager.cpp
     src/scan/escl_scan_backend.cpp
+    src/scan/sane_capabilities.cpp
     src/scan/sane_scan_backend.cpp
 )
 
