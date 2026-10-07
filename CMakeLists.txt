@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 cmake_minimum_required(VERSION 3.25)
-project(docsuite_device_core VERSION 0.1.0 LANGUAGES CXX)
+project(docsuite_device_core VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +23,7 @@ find_library(SANE_LIBRARY NAMES sane REQUIRED)
 add_library(docsuite_device_core
     src/device/device_manager.cpp
     src/print/cups_print_backend.cpp
+    src/scan/escl_scan_backend.cpp
     src/scan/sane_scan_backend.cpp
 )
 
