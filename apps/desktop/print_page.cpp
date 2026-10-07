@@ -5,6 +5,7 @@
 #include "print_page.hpp"
 
 #include "docsuite/print/job_manager.hpp"
+#include "docsuite/print/print_validation.hpp"
 
 #include <QAbstractItemView>
 #include <QComboBox>
@@ -22,6 +23,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
@@ -120,6 +122,20 @@ void select_if_available(QComboBox* combo, const QVariant& value) {
     }
 }
 
+[[nodiscard]] QString preflight_summary(const PrintPreflightResult& result) {
+    QStringList lines;
+    lines << (result.ok
+        ? QStringLiteral("Ready — selected options are supported by the cached printer capabilities.")
+        : QStringLiteral("Blocked — selected options are not supported."));
+    for (const auto& error : result.errors) {
+        lines << QStringLiteral("Error: %1").arg(QString::fromStdString(error));
+    }
+    for (const auto& warning : result.warnings) {
+        lines << QStringLiteral("Warning: %1").arg(QString::fromStdString(warning));
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
 } // namespace
 
 PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
@@ -166,6 +182,11 @@ PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
 
     capabilities_status_ = new QLabel(QStringLiteral("Capabilities not loaded yet"), print_group);
     capabilities_status_->setWordWrap(true);
+    preflight_status_ = new QLabel(
+        QStringLiteral("Preflight waiting for printer capabilities"),
+        print_group);
+    preflight_status_->setWordWrap(true);
+    preflight_status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
     form->addRow(QStringLiteral("Printer"), printer_row);
     form->addRow(QStringLiteral("File"), file_row);
@@ -178,6 +199,7 @@ PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
     form->addRow(QStringLiteral("Media type"), media_type_);
     form->addRow(QStringLiteral("Copies"), copies_);
     form->addRow(QStringLiteral("IPP capabilities"), capabilities_status_);
+    form->addRow(QStringLiteral("Preflight"), preflight_status_);
 
     auto* submit_row = new QHBoxLayout();
     print_ = new QPushButton(QStringLiteral("Print"), print_group);
@@ -228,9 +250,18 @@ PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
     connect(cancel_, &QPushButton::clicked, this, [this]() { cancel_selected(); });
     connect(preset_, &QComboBox::currentIndexChanged, this, [this](int) { apply_preset(); });
     connect(printer_, &QComboBox::currentIndexChanged, this, [this](int) {
+        last_capabilities_.reset();
+        update_preflight();
         refresh_jobs();
         refresh_capabilities(false);
     });
+
+    for (QComboBox* combo : {color_, sides_, quality_, media_, source_, media_type_}) {
+        connect(combo, &QComboBox::currentIndexChanged, this, [this](int) {
+            update_preflight();
+        });
+    }
+    connect(copies_, &QSpinBox::valueChanged, this, [this](int) { update_preflight(); });
 
     refresh_printers();
 }
@@ -268,7 +299,9 @@ void PrintPage::refresh_printers() {
                 diagnose_->setEnabled(available);
                 refresh_capabilities_->setEnabled(available);
                 if (!available) {
+                    last_capabilities_.reset();
                     capabilities_status_->setText(QStringLiteral("No printer discovered"));
+                    update_preflight();
                 }
             } catch (const std::exception& error) {
                 log_->appendPlainText(
@@ -331,6 +364,7 @@ void PrintPage::refresh_capabilities(const bool force_refresh) {
                     std::max(std::max(1, caps.copies_min), caps.copies_max));
                 copies_->setValue(1);
 
+                last_capabilities_ = caps;
                 capabilities_status_->setText(
                     QStringLiteral("%1 — %2 color mode(s), %3 paper size(s), %4 source(s), copies %5–%6")
                         .arg(QString::fromStdString(caps.source))
@@ -340,10 +374,13 @@ void PrintPage::refresh_capabilities(const bool force_refresh) {
                         .arg(caps.copies_min)
                         .arg(caps.copies_max));
                 apply_preset();
+                update_preflight();
             } catch (const std::exception& error) {
+                last_capabilities_.reset();
                 capabilities_status_->setText(
                     QStringLiteral("Capability error: %1").arg(QString::fromUtf8(error.what())));
                 log_->appendPlainText(capabilities_status_->text());
+                update_preflight();
             }
             refresh_capabilities_->setEnabled(printer_->count() > 0);
             watcher->deleteLater();
@@ -367,27 +404,26 @@ void PrintPage::browse_file() {
 
 void PrintPage::apply_preset() {
     const QString key = preset_->currentData().toString();
-    if (key == QStringLiteral("custom")) {
-        return;
+    if (key != QStringLiteral("custom")) {
+        if (key == QStringLiteral("mono")) {
+            select_if_available(color_, QStringLiteral("monochrome"));
+            select_if_available(sides_, QStringLiteral("one-sided"));
+            select_if_available(quality_, 4);
+        } else if (key == QStringLiteral("economy")) {
+            select_if_available(color_, QStringLiteral("monochrome"));
+            select_if_available(sides_, QStringLiteral("two-sided-long-edge"));
+            select_if_available(quality_, 3);
+        } else if (key == QStringLiteral("high")) {
+            select_if_available(color_, QStringLiteral("color"));
+            select_if_available(sides_, QStringLiteral("one-sided"));
+            select_if_available(quality_, 5);
+        } else {
+            select_if_available(color_, QStringLiteral("color"));
+            select_if_available(sides_, QStringLiteral("one-sided"));
+            select_if_available(quality_, 4);
+        }
     }
-
-    if (key == QStringLiteral("mono")) {
-        select_if_available(color_, QStringLiteral("monochrome"));
-        select_if_available(sides_, QStringLiteral("one-sided"));
-        select_if_available(quality_, 4);
-    } else if (key == QStringLiteral("economy")) {
-        select_if_available(color_, QStringLiteral("monochrome"));
-        select_if_available(sides_, QStringLiteral("two-sided-long-edge"));
-        select_if_available(quality_, 3);
-    } else if (key == QStringLiteral("high")) {
-        select_if_available(color_, QStringLiteral("color"));
-        select_if_available(sides_, QStringLiteral("one-sided"));
-        select_if_available(quality_, 5);
-    } else {
-        select_if_available(color_, QStringLiteral("color"));
-        select_if_available(sides_, QStringLiteral("one-sided"));
-        select_if_available(quality_, 4);
-    }
+    update_preflight();
 }
 
 PrintProfile PrintPage::selected_profile() const {
@@ -411,6 +447,27 @@ PrintProfile PrintPage::selected_profile() const {
     return result;
 }
 
+void PrintPage::update_preflight() {
+    const bool printer_available = !printer_->currentData().toString().isEmpty();
+    if (!last_capabilities_.has_value() ||
+        last_capabilities_->printer != printer_->currentData().toString().toStdString()) {
+        preflight_status_->setText(
+            printer_available
+                ? QStringLiteral("Waiting for cached printer capabilities; submission will validate again in PrintCore.")
+                : QStringLiteral("No printer selected."));
+        print_->setEnabled(printer_available);
+        diagnose_->setEnabled(printer_available);
+        return;
+    }
+
+    const auto result = validate_print_profile(
+        *last_capabilities_,
+        selected_profile());
+    preflight_status_->setText(preflight_summary(result));
+    print_->setEnabled(printer_available && result.ok);
+    diagnose_->setEnabled(printer_available && result.ok);
+}
+
 void PrintPage::submit(const bool diagnostic) {
     const QString printer = printer_->currentData().toString();
     const QString path = file_->text().trimmed();
@@ -422,6 +479,18 @@ void PrintPage::submit(const bool diagnostic) {
         QMessageBox::warning(this, QStringLiteral("DocSuite Print"),
             QStringLiteral("Choose an existing file first."));
         return;
+    }
+
+    if (last_capabilities_.has_value()) {
+        const auto result = validate_print_profile(*last_capabilities_, selected_profile());
+        if (!result.ok) {
+            preflight_status_->setText(preflight_summary(result));
+            QMessageBox::warning(
+                this,
+                QStringLiteral("DocSuite Print"),
+                QStringLiteral("The selected print options failed preflight. Fix them before submitting."));
+            return;
+        }
     }
 
     print_->setEnabled(false);
@@ -444,8 +513,7 @@ void PrintPage::submit(const bool diagnostic) {
                     log_->setPlainText(
                         QStringLiteral("Diagnostic error: %1").arg(QString::fromUtf8(error.what())));
                 }
-                print_->setEnabled(printer_->count() > 0);
-                diagnose_->setEnabled(printer_->count() > 0);
+                update_preflight();
                 refresh_jobs();
                 watcher->deleteLater();
             });
@@ -469,8 +537,7 @@ void PrintPage::submit(const bool diagnostic) {
                 log_->setPlainText(
                     QStringLiteral("Print error: %1").arg(QString::fromUtf8(error.what())));
             }
-            print_->setEnabled(printer_->count() > 0);
-            diagnose_->setEnabled(printer_->count() > 0);
+            update_preflight();
             refresh_jobs();
             watcher->deleteLater();
         });
