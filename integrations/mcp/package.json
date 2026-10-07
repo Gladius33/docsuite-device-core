@@ -1,0 +1,22 @@
+{
+  "name": "@docsuite/device-mcp",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Local MCP sidecar for DocSuite Device Core",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
