@@ -49,3 +49,15 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Build Debian package
+        if: matrix.build_type == 'Release'
+        run: cmake --build build --target package
+
+      - name: Upload Debian package
+        if: matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: docsuite-device-core-deb
+          path: build/*.deb
+          if-no-files-found: error
