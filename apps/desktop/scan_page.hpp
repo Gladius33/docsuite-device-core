@@ -6,7 +6,10 @@
 #include "docsuite/device/device_manager.hpp"
 #include "docsuite/ocr/tesseract_ocr.hpp"
 
+#include <QByteArray>
+#include <QFile>
 #include <QImage>
+#include <QPixmap>
 #include <QWidget>
 
 #include <memory>
