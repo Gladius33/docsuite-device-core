@@ -13,34 +13,12 @@
 #include <algorithm>
 
 namespace docsuite::desktop {
+namespace {
 
-bool export_scan_pdf(
-    const QString& path,
+void paint_page(
+    QPainter& painter,
     const QImage& image,
-    const int dpi,
-    const std::optional<OcrResult>& ocr,
-    QString* error_message) {
-
-    if (image.isNull()) {
-        if (error_message != nullptr) {
-            *error_message = QStringLiteral("No scan image is available.");
-        }
-        return false;
-    }
-
-    QPdfWriter writer(path);
-    writer.setCreator(QStringLiteral("DocSuite Device Center"));
-    writer.setTitle(QStringLiteral("Scanned document"));
-    writer.setResolution(std::max(dpi, 150));
-    writer.setPageSize(QPageSize(QPageSize::A4));
-
-    QPainter painter(&writer);
-    if (!painter.isActive()) {
-        if (error_message != nullptr) {
-            *error_message = QStringLiteral("Unable to initialize the PDF painter.");
-        }
-        return false;
-    }
+    const std::optional<OcrResult>& ocr) {
 
     QRectF target = painter.viewport();
     QSizeF scaled = image.size();
@@ -48,8 +26,6 @@ bool export_scan_pdf(
     target.setSize(scaled);
     target.moveCenter(QRectF(painter.viewport()).center());
 
-    // Paint OCR text first so the image hides it visually while PDF viewers can
-    // still search/select the underlying text layer.
     if (ocr.has_value() && !ocr->words.empty()) {
         const double scale_x = target.width() / static_cast<double>(image.width());
         const double scale_y = target.height() / static_cast<double>(image.height());
@@ -77,6 +53,73 @@ bool export_scan_pdf(
     }
 
     painter.drawImage(target, image);
+}
+
+} // namespace
+
+bool export_scan_pdf(
+    const QString& path,
+    const QImage& image,
+    const int dpi,
+    const std::optional<OcrResult>& ocr,
+    QString* error_message) {
+
+    return export_scan_pdf_pages(
+        path,
+        std::vector<PdfScanPage>{PdfScanPage{.image = image, .dpi = dpi, .ocr = ocr}},
+        error_message);
+}
+
+bool export_scan_pdf_pages(
+    const QString& path,
+    const std::vector<PdfScanPage>& pages,
+    QString* error_message) {
+
+    if (pages.empty()) {
+        if (error_message != nullptr) {
+            *error_message = QStringLiteral("No scan pages are available.");
+        }
+        return false;
+    }
+    if (std::any_of(pages.begin(), pages.end(), [](const PdfScanPage& page) {
+            return page.image.isNull();
+        })) {
+        if (error_message != nullptr) {
+            *error_message = QStringLiteral("At least one PDF page has no image.");
+        }
+        return false;
+    }
+
+    int resolution = 150;
+    for (const auto& page : pages) {
+        resolution = std::max(resolution, page.dpi);
+    }
+
+    QPdfWriter writer(path);
+    writer.setCreator(QStringLiteral("DocSuite Device Center"));
+    writer.setTitle(QStringLiteral("Scanned document"));
+    writer.setResolution(resolution);
+    writer.setPageSize(QPageSize(QPageSize::A4));
+
+    QPainter painter(&writer);
+    if (!painter.isActive()) {
+        if (error_message != nullptr) {
+            *error_message = QStringLiteral("Unable to initialize the PDF painter.");
+        }
+        return false;
+    }
+
+    for (std::size_t index = 0; index < pages.size(); ++index) {
+        if (index != 0U && !writer.newPage()) {
+            painter.end();
+            if (error_message != nullptr) {
+                *error_message = QStringLiteral("Unable to create a new PDF page.");
+            }
+            return false;
+        }
+        paint_page(painter, pages[index].image, pages[index].ocr);
+    }
+
     painter.end();
     return true;
 }
