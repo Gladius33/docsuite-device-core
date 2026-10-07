@@ -9,6 +9,7 @@
 #include "document_page.hpp"
 #include "print_page.hpp"
 #include "scan_page.hpp"
+#include "system_page.hpp"
 
 #include <QTabWidget>
 
@@ -26,6 +27,7 @@ MainWindow::MainWindow(QWidget* parent)
     tabs->addTab(new DocumentPage(manager_, tabs), QStringLiteral("Document"));
     tabs->addTab(new CopyPage(manager_, tabs), QStringLiteral("Copy"));
     tabs->addTab(new PrintPage(manager_, tabs), QStringLiteral("Print / Jobs"));
+    tabs->addTab(new SystemPage(manager_, tabs), QStringLiteral("System"));
     setCentralWidget(tabs);
 }
 
