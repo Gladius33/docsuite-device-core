@@ -61,7 +61,7 @@ function textResult(value: unknown) {
 }
 
 function createServer(): McpServer {
-  const server = new McpServer({ name: 'docsuite-device-core', version: '0.4.0' });
+  const server = new McpServer({ name: 'docsuite-device-core', version: '0.5.0' });
 
   server.registerTool(
     'device_list',
@@ -107,6 +107,22 @@ function createServer(): McpServer {
       textResult(await rpc('printer.jobs', {
         printer,
         include_completed: includeCompleted
+      }))
+  );
+
+  server.registerTool(
+    'printer_cancel_job',
+    {
+      description: 'Cancel a CUPS job only if the local DocSuite service confirms that the job belongs to the current Unix user.',
+      inputSchema: z.object({
+        printer: z.string().min(1),
+        jobId: z.number().int().positive()
+      })
+    },
+    async ({ printer, jobId }) =>
+      textResult(await rpc('printer.cancel_job', {
+        printer,
+        job_id: jobId
       }))
   );
 
