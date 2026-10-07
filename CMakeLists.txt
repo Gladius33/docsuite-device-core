@@ -121,6 +121,8 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/scan_page.hpp
         apps/desktop/document_page.cpp
         apps/desktop/document_page.hpp
+        apps/desktop/selection_preview.cpp
+        apps/desktop/selection_preview.hpp
         apps/desktop/copy_page.cpp
         apps/desktop/copy_page.hpp
         apps/desktop/print_page.cpp
