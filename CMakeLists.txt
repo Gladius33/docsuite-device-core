@@ -14,6 +14,7 @@ include(CTest)
 include(GNUInstallDirs)
 
 option(DOCSUITE_BUILD_DESKTOP "Build the Qt desktop application" ON)
+option(DOCSUITE_BUILD_SERVICE "Build the persistent local device service" ON)
 option(DOCSUITE_BUILD_TESTS "Build tests" ON)
 option(DOCSUITE_ENABLE_OCR "Enable Tesseract OCR when available" ON)
 
@@ -31,22 +32,14 @@ add_library(docsuite_device_core
     src/scan/sane_capabilities.cpp
     src/scan/sane_scan_backend.cpp
 )
-
 add_library(DocSuite::DeviceCore ALIAS docsuite_device_core)
 
 target_include_directories(docsuite_device_core
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE
-        ${CUPS_INCLUDE_DIR}
-        ${SANE_INCLUDE_DIR}
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CUPS_INCLUDE_DIR} ${SANE_INCLUDE_DIR}
 )
-
-target_link_libraries(docsuite_device_core
-    PRIVATE
-        ${CUPS_LIBRARY}
-        ${SANE_LIBRARY}
-)
+target_link_libraries(docsuite_device_core PRIVATE ${CUPS_LIBRARY} ${SANE_LIBRARY})
+target_compile_options(docsuite_device_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 
 if(DOCSUITE_ENABLE_OCR)
     find_package(PkgConfig QUIET)
@@ -62,16 +55,24 @@ if(DOCSUITE_ENABLE_OCR)
     endif()
 endif()
 
-target_compile_options(docsuite_device_core PRIVATE
-    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
-)
-
 add_executable(docsuite-device-cli apps/cli/main.cpp)
 target_link_libraries(docsuite-device-cli PRIVATE DocSuite::DeviceCore)
-set_target_properties(docsuite-device-cli PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/cli
-)
+set_target_properties(docsuite-device-cli PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/cli)
 install(TARGETS docsuite-device-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if(DOCSUITE_BUILD_SERVICE)
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Core Network)
+    qt_add_executable(docsuite-device-service services/device-service/main.cpp)
+    target_link_libraries(docsuite-device-service PRIVATE DocSuite::DeviceCore Qt6::Core Qt6::Network)
+    set_target_properties(docsuite-device-service PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/services/device-service
+    )
+    install(TARGETS docsuite-device-service RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(
+        FILES packaging/systemd/docsuite-device-service.service
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/systemd/user
+    )
+endif()
 
 if(DOCSUITE_BUILD_DESKTOP)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent)
@@ -90,13 +91,7 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/pdf_export.cpp
         apps/desktop/pdf_export.hpp
     )
-    target_link_libraries(
-        docsuite-device-center
-        PRIVATE
-            DocSuite::DeviceCore
-            Qt6::Widgets
-            Qt6::Concurrent
-    )
+    target_link_libraries(docsuite-device-center PRIVATE DocSuite::DeviceCore Qt6::Widgets Qt6::Concurrent)
     set_target_properties(docsuite-device-center PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/desktop
     )
