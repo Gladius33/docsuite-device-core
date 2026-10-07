@@ -20,6 +20,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QTransform>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
@@ -88,6 +89,13 @@ void populate_strings(QComboBox* combo, const std::vector<std::string>& values) 
     return frame;
 }
 
+void remember_undo(PdfScanPage& page) {
+    page.undo_image = page.image;
+    page.undo_dpi = page.dpi;
+    page.undo_ocr = page.ocr;
+    page.has_undo = true;
+}
+
 } // namespace
 
 DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
@@ -150,6 +158,13 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     crop_selection_ = new QPushButton(QStringLiteral("Crop selection"), process_group);
     crop_selection_->setToolTip(QStringLiteral(
         "Drag a rectangle over the page preview, then crop to that exact source area."));
+
+    auto* rotate_row = new QHBoxLayout();
+    rotate_left_ = new QPushButton(QStringLiteral("↶ Rotate left"), process_group);
+    rotate_right_ = new QPushButton(QStringLiteral("Rotate right ↷"), process_group);
+    rotate_row->addWidget(rotate_left_);
+    rotate_row->addWidget(rotate_right_);
+
     enhance_ = new QPushButton(QStringLiteral("Enhance document contrast"), process_group);
     binarize_ = new QPushButton(QStringLiteral("Black && white document"), process_group);
     deskew_ = new QPushButton(QStringLiteral("Automatic deskew"), process_group);
@@ -157,11 +172,15 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     if (!processor_.deskew_available()) {
         deskew_->setToolTip(QStringLiteral("Deskew is available when DocSuite is built with OpenCV."));
     }
+    undo_ = new QPushButton(QStringLiteral("Undo last page transform"), process_group);
+
     process_layout->addWidget(auto_crop_);
     process_layout->addWidget(crop_selection_);
+    process_layout->addLayout(rotate_row);
     process_layout->addWidget(enhance_);
     process_layout->addWidget(binarize_);
     process_layout->addWidget(deskew_);
+    process_layout->addWidget(undo_);
     left_layout->addWidget(process_group);
 
     ocr_button_ = new QPushButton(QStringLiteral("OCR selected page (fra+eng)"), left);
@@ -191,6 +210,9 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     connect(clear_, &QPushButton::clicked, this, [this]() { clear_pages(); });
     connect(auto_crop_, &QPushButton::clicked, this, [this]() { transform_selected("crop"); });
     connect(crop_selection_, &QPushButton::clicked, this, [this]() { crop_selection(); });
+    connect(rotate_left_, &QPushButton::clicked, this, [this]() { transform_selected("rotate-left"); });
+    connect(rotate_right_, &QPushButton::clicked, this, [this]() { transform_selected("rotate-right"); });
+    connect(undo_, &QPushButton::clicked, this, [this]() { undo_selected(); });
     connect(enhance_, &QPushButton::clicked, this, [this]() { transform_selected("enhance"); });
     connect(binarize_, &QPushButton::clicked, this, [this]() { transform_selected("binarize"); });
     connect(deskew_, &QPushButton::clicked, this, [this]() { transform_selected("deskew"); });
@@ -199,7 +221,12 @@ DocumentPage::DocumentPage(std::shared_ptr<DeviceManager> manager, QWidget* pare
     connect(scanner_, &QComboBox::currentIndexChanged, this,
         [this](int) { refresh_capabilities(); });
     connect(pages_list_, &QListWidget::currentRowChanged, this,
-        [this](int) { update_preview(); });
+        [this](const int row) {
+            update_preview();
+            const bool can_undo = row >= 0 && row < static_cast<int>(pages_.size()) &&
+                pages_[static_cast<std::size_t>(row)].has_undo;
+            undo_->setEnabled(can_undo);
+        });
 
     refresh_scanners();
     update_list();
@@ -403,13 +430,36 @@ void DocumentPage::clear_pages() {
     status_->setText(QStringLiteral("Document session cleared"));
 }
 
+void DocumentPage::set_page_editing_busy(const bool busy) {
+    const bool has_pages = !pages_.empty();
+    pages_list_->setEnabled(!busy);
+    delete_->setEnabled(!busy && has_pages);
+    up_->setEnabled(!busy && has_pages);
+    down_->setEnabled(!busy && has_pages);
+    clear_->setEnabled(!busy && has_pages);
+    auto_crop_->setEnabled(!busy && has_pages);
+    crop_selection_->setEnabled(!busy && has_pages);
+    rotate_left_->setEnabled(!busy && has_pages);
+    rotate_right_->setEnabled(!busy && has_pages);
+    enhance_->setEnabled(!busy && has_pages);
+    binarize_->setEnabled(!busy && has_pages);
+    deskew_->setEnabled(!busy && has_pages && processor_.deskew_available());
+    ocr_button_->setEnabled(!busy && has_pages && ocr_engine_.available());
+    export_->setEnabled(!busy && has_pages);
+
+    const int row = pages_list_->currentRow();
+    const bool can_undo = !busy && row >= 0 && row < static_cast<int>(pages_.size()) &&
+        pages_[static_cast<std::size_t>(row)].has_undo;
+    undo_->setEnabled(can_undo);
+}
+
 void DocumentPage::run_ocr_selected() {
     const int row = pages_list_->currentRow();
     if (row < 0 || row >= static_cast<int>(pages_.size()) || !ocr_engine_.available()) {
         return;
     }
 
-    ocr_button_->setEnabled(false);
+    set_page_editing_busy(true);
     status_->setText(QStringLiteral("OCR page %1…").arg(row + 1));
     const ScanFrame frame = frame_from_image(
         pages_[static_cast<std::size_t>(row)].image,
@@ -432,7 +482,7 @@ void DocumentPage::run_ocr_selected() {
                 status_->setText(
                     QStringLiteral("OCR error: %1").arg(QString::fromUtf8(error.what())));
             }
-            ocr_button_->setEnabled(ocr_engine_.available() && !pages_.empty());
+            set_page_editing_busy(false);
             watcher->deleteLater();
         });
     watcher->setFuture(QtConcurrent::run([frame]() {
@@ -455,9 +505,7 @@ void DocumentPage::transform_selected(const std::string& operation) {
         pages_[static_cast<std::size_t>(row)].image,
         pages_[static_cast<std::size_t>(row)].dpi);
 
-    for (auto* button : {auto_crop_, crop_selection_, enhance_, binarize_, deskew_, ocr_button_}) {
-        button->setEnabled(false);
-    }
+    set_page_editing_busy(true);
     status_->setText(
         QStringLiteral("Processing page %1: %2…")
             .arg(row + 1)
@@ -478,13 +526,14 @@ void DocumentPage::transform_selected(const std::string& operation) {
                         throw std::runtime_error("Processed frame is empty");
                     }
                     auto& page = pages_[static_cast<std::size_t>(row)];
+                    remember_undo(page);
                     page.image = std::move(image);
                     page.dpi = frame->dpi > 0 ? frame->dpi : page.dpi;
                     page.ocr.reset();
                     update_list();
                     pages_list_->setCurrentRow(row);
                     status_->setText(
-                        QStringLiteral("Page %1 processed (%2) — rerun OCR if needed")
+                        QStringLiteral("Page %1 processed (%2) — Undo available")
                             .arg(row + 1)
                             .arg(QString::fromStdString(operation)));
                 }
@@ -493,7 +542,7 @@ void DocumentPage::transform_selected(const std::string& operation) {
                     QStringLiteral("Image processing error: %1")
                         .arg(QString::fromUtf8(error.what())));
             }
-            update_list();
+            set_page_editing_busy(false);
             watcher->deleteLater();
         });
 
@@ -508,6 +557,14 @@ void DocumentPage::transform_selected(const std::string& operation) {
             output = processor.enhance_document(input, true);
         } else if (operation == "deskew") {
             output = processor.deskew(input);
+        } else if (operation == "rotate-left" || operation == "rotate-right") {
+            const QImage source = image_from_frame(input);
+            if (source.isNull()) {
+                throw std::runtime_error("Unable to build image for rotation");
+            }
+            QTransform transform;
+            transform.rotate(operation == "rotate-left" ? -90.0 : 90.0);
+            output = frame_from_image(source.transformed(transform), input.dpi);
         } else {
             throw std::runtime_error("Unknown document transform: " + operation);
         }
@@ -538,9 +595,7 @@ void DocumentPage::crop_selection() {
         .height = selected->height(),
     };
 
-    for (auto* button : {auto_crop_, crop_selection_, enhance_, binarize_, deskew_, ocr_button_}) {
-        button->setEnabled(false);
-    }
+    set_page_editing_busy(true);
     status_->setText(
         QStringLiteral("Cropping page %1 to %2 × %3 px…")
             .arg(row + 1)
@@ -562,13 +617,14 @@ void DocumentPage::crop_selection() {
                         throw std::runtime_error("Manual crop produced an empty image");
                     }
                     auto& page = pages_[static_cast<std::size_t>(row)];
+                    remember_undo(page);
                     page.image = std::move(image);
                     page.dpi = frame->dpi > 0 ? frame->dpi : page.dpi;
                     page.ocr.reset();
                     update_list();
                     pages_list_->setCurrentRow(row);
                     status_->setText(
-                        QStringLiteral("Page %1 cropped to selection — rerun OCR if needed")
+                        QStringLiteral("Page %1 cropped to selection — Undo available")
                             .arg(row + 1));
                 }
             } catch (const std::exception& error) {
@@ -576,7 +632,7 @@ void DocumentPage::crop_selection() {
                     QStringLiteral("Manual crop error: %1")
                         .arg(QString::fromUtf8(error.what())));
             }
-            update_list();
+            set_page_editing_busy(false);
             watcher->deleteLater();
         });
 
@@ -584,6 +640,29 @@ void DocumentPage::crop_selection() {
         ImageProcessor processor;
         return std::make_shared<ScanFrame>(processor.crop(input, rect));
     }));
+}
+
+void DocumentPage::undo_selected() {
+    const int row = pages_list_->currentRow();
+    if (row < 0 || row >= static_cast<int>(pages_.size())) {
+        return;
+    }
+
+    auto& page = pages_[static_cast<std::size_t>(row)];
+    if (!page.has_undo || page.undo_image.isNull()) {
+        status_->setText(QStringLiteral("Nothing to undo on this page"));
+        return;
+    }
+
+    page.image = std::move(page.undo_image);
+    page.dpi = page.undo_dpi;
+    page.ocr = std::move(page.undo_ocr);
+    page.undo_image = {};
+    page.undo_ocr.reset();
+    page.has_undo = false;
+    update_list();
+    pages_list_->setCurrentRow(row);
+    status_->setText(QStringLiteral("Restored page %1 before its last transform").arg(row + 1));
 }
 
 void DocumentPage::export_pdf() {
@@ -631,6 +710,9 @@ void DocumentPage::update_list() {
         if (page.ocr.has_value()) {
             label += QStringLiteral(" — OCR %1%").arg(page.ocr->mean_confidence);
         }
+        if (page.has_undo) {
+            label += QStringLiteral(" — undo");
+        }
         pages_list_->addItem(label);
     }
     if (!pages_.empty()) {
@@ -639,6 +721,7 @@ void DocumentPage::update_list() {
     }
 
     const bool has_pages = !pages_.empty();
+    pages_list_->setEnabled(true);
     delete_->setEnabled(has_pages);
     up_->setEnabled(has_pages);
     down_->setEnabled(has_pages);
@@ -646,10 +729,17 @@ void DocumentPage::update_list() {
     export_->setEnabled(has_pages);
     auto_crop_->setEnabled(has_pages);
     crop_selection_->setEnabled(has_pages);
+    rotate_left_->setEnabled(has_pages);
+    rotate_right_->setEnabled(has_pages);
     enhance_->setEnabled(has_pages);
     binarize_->setEnabled(has_pages);
     deskew_->setEnabled(has_pages && processor_.deskew_available());
     ocr_button_->setEnabled(has_pages && ocr_engine_.available());
+
+    const int row = pages_list_->currentRow();
+    undo_->setEnabled(
+        row >= 0 && row < static_cast<int>(pages_.size()) &&
+        pages_[static_cast<std::size_t>(row)].has_undo);
     update_preview();
 }
 
