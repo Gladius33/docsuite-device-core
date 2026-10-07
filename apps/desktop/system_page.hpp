@@ -25,6 +25,9 @@ private:
     void refresh_devices();
     void update_selection();
     void create_queue();
+    void install_profiles();
+    void remove_profiles();
+    void refresh_profiles();
     [[nodiscard]] QString suggested_queue_name() const;
 
     std::shared_ptr<DeviceManager> manager_;
@@ -33,9 +36,13 @@ private:
     QLineEdit* queue_name_{nullptr};
     QLabel* selected_uri_{nullptr};
     QLabel* queue_state_{nullptr};
+    QLabel* profiles_state_{nullptr};
     QLabel* explanation_{nullptr};
     QPushButton* refresh_{nullptr};
     QPushButton* create_{nullptr};
+    QPushButton* install_profiles_{nullptr};
+    QPushButton* remove_profiles_{nullptr};
+    QPushButton* refresh_profiles_{nullptr};
 };
 
 } // namespace docsuite::desktop
