@@ -106,7 +106,8 @@ int main(int argc, char** argv) {
             const bool refresh = argc >= 4 && std::string{argv[3]} == "--refresh";
             const auto caps = manager.print_backend().capabilities(argv[2], refresh);
 
-            std::cout << "Printer: " << caps.printer << '\n';
+            std::cout << "Printer: " << caps.printer << '\n'
+                      << "Source: " << caps.source << '\n';
             print_strings("Color modes", caps.color_modes);
             print_strings("Sides", caps.sides);
             print_ints("Quality", caps.qualities);
