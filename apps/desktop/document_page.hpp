@@ -41,7 +41,7 @@ private:
     void update_preview();
 
     std::shared_ptr<DeviceManager> manager_;
-    TesseractOcr ocr_{};
+    TesseractOcr ocr_engine_{};
     ImageProcessor processor_{};
     std::vector<PdfScanPage> pages_{};
 
@@ -60,7 +60,7 @@ private:
     QPushButton* enhance_{nullptr};
     QPushButton* binarize_{nullptr};
     QPushButton* deskew_{nullptr};
-    QPushButton* ocr_{nullptr};
+    QPushButton* ocr_button_{nullptr};
     QPushButton* export_{nullptr};
     QPushButton* clear_{nullptr};
     QListWidget* pages_list_{nullptr};
