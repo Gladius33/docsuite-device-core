@@ -129,6 +129,7 @@ int main(int argc, char** argv) {
             }
             const auto status = manager.print_backend().status(argv[2]);
             std::cout << "Printer: " << status.printer << '\n'
+                      << "Source: " << status.source << '\n'
                       << "State: " << state_name(status.state) << '\n'
                       << "Accepting jobs: " << (status.accepting_jobs ? "yes" : "no") << '\n';
 
