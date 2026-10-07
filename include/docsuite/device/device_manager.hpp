@@ -9,6 +9,8 @@
 #include "docsuite/scan/escl_scan_backend.hpp"
 #include "docsuite/scan/sane_scan_backend.hpp"
 
+#include <string>
+
 namespace docsuite {
 
 class DeviceManager {
@@ -16,9 +18,13 @@ public:
     DeviceManager() : job_manager_{print_backend_} {}
 
     [[nodiscard]] DeviceSnapshot snapshot() const;
+    [[nodiscard]] ScannerCapabilities scanner_capabilities(const std::string& scanner) const;
+    [[nodiscard]] ScanFrame scan(const std::string& scanner, const ScanSettings& settings) const;
+
     [[nodiscard]] const CupsPrintBackend& print_backend() const noexcept { return print_backend_; }
     [[nodiscard]] const JobManager& job_manager() const noexcept { return job_manager_; }
     [[nodiscard]] const SaneScanBackend& scan_backend() const noexcept { return scan_backend_; }
+    [[nodiscard]] const EsclScanBackend& escl_backend() const noexcept { return escl_backend_; }
 
 private:
     CupsPrintBackend print_backend_{};
