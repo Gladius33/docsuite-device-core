@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 #include <unistd.h>
@@ -281,14 +282,14 @@ struct IppEndpoint {
     return true;
 }
 
-[[nodiscard]] bool direct_ipp_status(
-    const std::string& printer,
+[[nodiscard]] ipp_t* direct_ipp_query(
     const std::string& device_uri,
-    PrinterStatus& result) {
+    const char* const* requested_attributes,
+    const int requested_attribute_count) {
 
     IppEndpoint endpoint;
     if (!parse_ipp_endpoint(device_uri, endpoint)) {
-        return false;
+        return nullptr;
     }
 
     http_t* connection = httpConnect2(
@@ -301,7 +302,7 @@ struct IppEndpoint {
         3000,
         nullptr);
     if (connection == nullptr) {
-        return false;
+        return nullptr;
     }
 
     ipp_t* request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
@@ -312,6 +313,91 @@ struct IppEndpoint {
         "printer-uri",
         nullptr,
         device_uri.c_str());
+    ippAddStrings(
+        request,
+        IPP_TAG_OPERATION,
+        IPP_TAG_KEYWORD,
+        "requested-attributes",
+        requested_attribute_count,
+        nullptr,
+        requested_attributes);
+
+    ipp_t* response = cupsDoRequest(connection, request, endpoint.resource.c_str());
+    httpClose(connection);
+    if (response == nullptr) {
+        return nullptr;
+    }
+
+    if (ippGetStatusCode(response) >= IPP_STATUS_ERROR_BAD_REQUEST) {
+        ippDelete(response);
+        return nullptr;
+    }
+
+    return response;
+}
+
+[[nodiscard]] bool direct_ipp_capabilities(
+    const std::string& printer,
+    const std::string& device_uri,
+    PrinterCapabilities& result) {
+
+    static const char* const requested_attributes[] = {
+        "print-color-mode-supported",
+        "media-supported",
+        "media-type-supported",
+        "media-source-supported",
+        "sides-supported",
+        "print-quality-supported",
+        "printer-resolution-supported",
+        "document-format-supported",
+        "copies-supported",
+    };
+
+    ipp_t* response = direct_ipp_query(
+        device_uri,
+        requested_attributes,
+        static_cast<int>(std::size(requested_attributes)));
+    if (response == nullptr) {
+        return false;
+    }
+
+    PrinterCapabilities direct;
+    direct.printer = printer;
+    direct.source = "ipp-direct";
+    direct.color_modes = ipp_strings(ippFindAttribute(
+        response, "print-color-mode-supported", IPP_TAG_KEYWORD));
+    direct.media = ipp_strings(ippFindAttribute(
+        response, "media-supported", IPP_TAG_KEYWORD));
+    direct.media_types = ipp_strings(ippFindAttribute(
+        response, "media-type-supported", IPP_TAG_KEYWORD));
+    direct.media_sources = ipp_strings(ippFindAttribute(
+        response, "media-source-supported", IPP_TAG_KEYWORD));
+    direct.sides = ipp_strings(ippFindAttribute(
+        response, "sides-supported", IPP_TAG_KEYWORD));
+    direct.qualities = ipp_integers(ippFindAttribute(
+        response, "print-quality-supported", IPP_TAG_ENUM));
+    direct.resolutions_dpi = ipp_resolutions(ippFindAttribute(
+        response, "printer-resolution-supported", IPP_TAG_RESOLUTION));
+    direct.document_formats = ipp_strings(ippFindAttribute(
+        response, "document-format-supported", IPP_TAG_MIMETYPE));
+
+    if (ipp_attribute_t* copies = ippFindAttribute(
+            response, "copies-supported", IPP_TAG_RANGE)) {
+        int upper = 1;
+        direct.copies_min = ippGetRange(copies, 0, &upper);
+        direct.copies_max = upper;
+    }
+
+    direct.fetched_at = std::chrono::system_clock::now();
+    ippDelete(response);
+    result = std::move(direct);
+    return true;
+}
+
+[[nodiscard]] bool direct_ipp_status(
+    const std::string& printer,
+    const std::string& device_uri,
+    PrinterStatus& result) {
 
     static const char* const requested_attributes[] = {
         "printer-state",
@@ -323,23 +409,11 @@ struct IppEndpoint {
         "marker-low-levels",
     };
 
-    ippAddStrings(
-        request,
-        IPP_TAG_OPERATION,
-        IPP_TAG_KEYWORD,
-        "requested-attributes",
-        static_cast<int>(std::size(requested_attributes)),
-        nullptr,
-        requested_attributes);
-
-    ipp_t* response = cupsDoRequest(connection, request, endpoint.resource.c_str());
-    httpClose(connection);
+    ipp_t* response = direct_ipp_query(
+        device_uri,
+        requested_attributes,
+        static_cast<int>(std::size(requested_attributes)));
     if (response == nullptr) {
-        return false;
-    }
-
-    if (ippGetStatusCode(response) >= IPP_STATUS_ERROR_BAD_REQUEST) {
-        ippDelete(response);
         return false;
     }
 
@@ -455,42 +529,50 @@ PrinterCapabilities CupsPrintBackend::capabilities(
         throw std::runtime_error("CUPS destination not found: " + printer);
     }
 
-    cups_dinfo_t* info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, destination);
-    if (info == nullptr) {
-        cupsFreeDests(1, destination);
-        throw std::runtime_error("Unable to query printer capabilities: " + printer);
-    }
-
     PrinterCapabilities result;
-    result.printer = printer;
-    result.color_modes = ipp_strings(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "print-color-mode"));
-    result.media = ipp_strings(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "media"));
-    result.media_types = ipp_strings(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "media-type"));
-    result.media_sources = ipp_strings(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "media-source"));
-    result.sides = ipp_strings(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "sides"));
-    result.qualities = ipp_integers(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "print-quality"));
-    result.resolutions_dpi = ipp_resolutions(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "printer-resolution"));
-    result.document_formats = ipp_strings(cupsFindDestSupported(
-        CUPS_HTTP_DEFAULT, destination, info, "document-format"));
+    const char* raw_device_uri = cupsGetOption(
+        "device-uri", destination->num_options, destination->options);
 
-    if (ipp_attribute_t* copies = cupsFindDestSupported(
-            CUPS_HTTP_DEFAULT, destination, info, "copies")) {
-        int upper = 1;
-        result.copies_min = ippGetRange(copies, 0, &upper);
-        result.copies_max = upper;
+    if (raw_device_uri != nullptr &&
+        direct_ipp_capabilities(printer, raw_device_uri, result)) {
+        cupsFreeDests(1, destination);
+    } else {
+        cups_dinfo_t* info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, destination);
+        if (info == nullptr) {
+            cupsFreeDests(1, destination);
+            throw std::runtime_error("Unable to query printer capabilities: " + printer);
+        }
+
+        result.printer = printer;
+        result.source = "cups";
+        result.color_modes = ipp_strings(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "print-color-mode"));
+        result.media = ipp_strings(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "media"));
+        result.media_types = ipp_strings(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "media-type"));
+        result.media_sources = ipp_strings(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "media-source"));
+        result.sides = ipp_strings(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "sides"));
+        result.qualities = ipp_integers(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "print-quality"));
+        result.resolutions_dpi = ipp_resolutions(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "printer-resolution"));
+        result.document_formats = ipp_strings(cupsFindDestSupported(
+            CUPS_HTTP_DEFAULT, destination, info, "document-format"));
+
+        if (ipp_attribute_t* copies = cupsFindDestSupported(
+                CUPS_HTTP_DEFAULT, destination, info, "copies")) {
+            int upper = 1;
+            result.copies_min = ippGetRange(copies, 0, &upper);
+            result.copies_max = upper;
+        }
+
+        result.fetched_at = std::chrono::system_clock::now();
+        cupsFreeDestInfo(info);
+        cupsFreeDests(1, destination);
     }
-
-    result.fetched_at = std::chrono::system_clock::now();
-
-    cupsFreeDestInfo(info);
-    cupsFreeDests(1, destination);
 
     {
         std::scoped_lock lock{capability_cache_mutex_};
