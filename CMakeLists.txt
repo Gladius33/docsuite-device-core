@@ -154,6 +154,19 @@ if(BUILD_TESTING AND DOCSUITE_BUILD_TESTS)
             $<TARGET_FILE:docsuite-direct-ipp-probe-test>
     )
     set_tests_properties(docsuite-direct-ipp-integration PROPERTIES TIMEOUT 20)
+
+    if(DOCSUITE_BUILD_DESKTOP)
+        add_test(
+            NAME docsuite-gui-smoke
+            COMMAND $<TARGET_FILE:docsuite-device-center> --smoke-test
+        )
+        set_tests_properties(
+            docsuite-gui-smoke
+            PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+                TIMEOUT 15
+        )
+    endif()
 endif()
 
 set(CPACK_PACKAGE_NAME "docsuite-device-core")
