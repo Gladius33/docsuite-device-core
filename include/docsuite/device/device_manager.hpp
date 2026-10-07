@@ -5,6 +5,7 @@
 
 #include "docsuite/core/types.hpp"
 #include "docsuite/print/cups_print_backend.hpp"
+#include "docsuite/scan/escl_scan_backend.hpp"
 #include "docsuite/scan/sane_scan_backend.hpp"
 
 namespace docsuite {
@@ -17,6 +18,7 @@ public:
 private:
     CupsPrintBackend print_backend_{};
     SaneScanBackend scan_backend_{};
+    EsclScanBackend escl_backend_{};
 };
 
 } // namespace docsuite
