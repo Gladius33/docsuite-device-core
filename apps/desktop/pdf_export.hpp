@@ -9,14 +9,26 @@
 #include <QString>
 
 #include <optional>
+#include <vector>
 
 namespace docsuite::desktop {
+
+struct PdfScanPage {
+    QImage image;
+    int dpi{300};
+    std::optional<OcrResult> ocr;
+};
 
 [[nodiscard]] bool export_scan_pdf(
     const QString& path,
     const QImage& image,
     int dpi,
     const std::optional<OcrResult>& ocr,
+    QString* error_message = nullptr);
+
+[[nodiscard]] bool export_scan_pdf_pages(
+    const QString& path,
+    const std::vector<PdfScanPage>& pages,
     QString* error_message = nullptr);
 
 } // namespace docsuite::desktop
