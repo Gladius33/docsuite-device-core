@@ -114,7 +114,7 @@ SystemQueueInfo SystemQueueManager::ensure_temporary_driverless(
         IPP_TAG_NAME,
         "requesting-user-name",
         nullptr,
-        cupsGetUser());
+        cupsUser());
     ippAddString(
         request,
         IPP_TAG_PRINTER,
