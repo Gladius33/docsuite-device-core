@@ -27,6 +27,7 @@ add_library(docsuite_device_core
     src/device/device_manager.cpp
     src/ocr/tesseract_ocr.cpp
     src/print/cups_print_backend.cpp
+    src/print/cups_print_advanced.cpp
     src/print/job_manager.cpp
     src/scan/escl_scan_backend.cpp
     src/scan/sane_capabilities.cpp
