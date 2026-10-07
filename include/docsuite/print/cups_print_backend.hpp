@@ -23,6 +23,11 @@ public:
 
     [[nodiscard]] PrinterStatus status(const std::string& printer) const;
 
+    [[nodiscard]] PrintPreflightResult preflight(
+        const std::string& printer,
+        const PrintProfile& profile,
+        bool force_refresh = false) const;
+
     [[nodiscard]] int print_file(
         const std::string& printer,
         const std::string& path,
