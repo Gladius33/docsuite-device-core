@@ -31,6 +31,16 @@ struct ScannerInfo {
     std::string backend;
 };
 
+struct ScannerCapabilities {
+    std::string scanner;
+    std::string source{"sane"};
+    std::vector<std::string> modes;
+    std::vector<int> resolutions_dpi;
+    std::vector<std::string> sources;
+    double max_width_mm{0.0};
+    double max_height_mm{0.0};
+};
+
 struct SupplyLevel {
     std::string name;
     std::string type;
