@@ -6,13 +6,24 @@
 #include "docsuite/core/types.hpp"
 
 #include <string>
+#include <vector>
 
 namespace docsuite {
+
+struct OcrWord {
+    std::string text;
+    float confidence{0.0F};
+    int left{0};
+    int top{0};
+    int width{0};
+    int height{0};
+};
 
 struct OcrResult {
     std::string text;
     int mean_confidence{0};
     std::string language;
+    std::vector<OcrWord> words;
 };
 
 class TesseractOcr {
