@@ -7,12 +7,15 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
+#include <QFileDevice>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QStandardPaths>
+#include <QUuid>
 
 #include <pwd.h>
 #include <unistd.h>
@@ -25,7 +28,7 @@
 
 namespace {
 
-[[nodiscard]] QString socket_path() {
+[[nodiscard]] QString runtime_directory() {
     QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
     if (runtime.isEmpty()) {
         runtime = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
@@ -33,11 +36,35 @@ namespace {
     if (runtime.isEmpty()) {
         runtime = QDir::tempPath();
     }
-    return QDir(runtime).filePath(QStringLiteral("docsuite-device-core.sock"));
+    return runtime;
+}
+
+[[nodiscard]] QString socket_path() {
+    return QDir(runtime_directory()).filePath(
+        QStringLiteral("docsuite-device-core.sock"));
+}
+
+[[nodiscard]] QString scan_output_directory() {
+    const QString root = QDir(runtime_directory()).filePath(
+        QStringLiteral("docsuite-device-core/scans"));
+    if (!QDir{}.mkpath(root)) {
+        throw std::runtime_error(
+            "Unable to create private DocSuite scan output directory");
+    }
+    if (!QFile::setPermissions(
+            root,
+            QFileDevice::ReadOwner |
+                QFileDevice::WriteOwner |
+                QFileDevice::ExeOwner)) {
+        throw std::runtime_error(
+            "Unable to secure private DocSuite scan output directory");
+    }
+    return root;
 }
 
 [[nodiscard]] std::string current_username() {
-    if (const passwd* entry = getpwuid(geteuid()); entry != nullptr && entry->pw_name != nullptr) {
+    if (const passwd* entry = getpwuid(geteuid());
+        entry != nullptr && entry->pw_name != nullptr) {
         return entry->pw_name;
     }
     return {};
@@ -122,7 +149,9 @@ namespace {
     };
 }
 
-[[nodiscard]] QJsonObject scanner_capabilities_json(const docsuite::ScannerCapabilities& caps) {
+[[nodiscard]] QJsonObject scanner_capabilities_json(
+    const docsuite::ScannerCapabilities& caps) {
+
     return QJsonObject{
         {QStringLiteral("scanner"), QString::fromStdString(caps.scanner)},
         {QStringLiteral("source"), QString::fromStdString(caps.source)},
@@ -157,7 +186,8 @@ public:
         QLocalServer::removeServer(path);
         if (!server_.listen(path)) {
             throw std::runtime_error(
-                "Unable to listen on local DocSuite socket: " + server_.errorString().toStdString());
+                "Unable to listen on local DocSuite socket: " +
+                server_.errorString().toStdString());
         }
 
         QObject::connect(&server_, &QLocalServer::newConnection, this, [this]() {
@@ -180,10 +210,14 @@ public:
                         }
                     }
                 });
-                QObject::connect(socket, &QLocalSocket::disconnected, this, [this, socket]() {
-                    buffers_.remove(socket);
-                    socket->deleteLater();
-                });
+                QObject::connect(
+                    socket,
+                    &QLocalSocket::disconnected,
+                    this,
+                    [this, socket]() {
+                        buffers_.remove(socket);
+                        socket->deleteLater();
+                    });
             }
         });
     }
@@ -193,7 +227,11 @@ private:
         QJsonParseError parse_error{};
         const QJsonDocument document = QJsonDocument::fromJson(line, &parse_error);
         if (parse_error.error != QJsonParseError::NoError || !document.isObject()) {
-            return response(QJsonValue::Null, false, {}, QStringLiteral("invalid JSON request"));
+            return response(
+                QJsonValue::Null,
+                false,
+                {},
+                QStringLiteral("invalid JSON request"));
         }
 
         const QJsonObject request = document.object();
@@ -245,7 +283,9 @@ private:
             }
 
             if (method == QStringLiteral("printer.status")) {
-                const std::string printer = required_string(params, QStringLiteral("printer"));
+                const std::string printer = required_string(
+                    params,
+                    QStringLiteral("printer"));
                 return response(
                     id,
                     true,
@@ -254,20 +294,28 @@ private:
             }
 
             if (method == QStringLiteral("printer.capabilities")) {
-                const std::string printer = required_string(params, QStringLiteral("printer"));
+                const std::string printer = required_string(
+                    params,
+                    QStringLiteral("printer"));
                 const bool refresh = params.value(QStringLiteral("refresh")).toBool(false);
                 return response(
                     id,
                     true,
-                    capabilities_json(manager_->print_backend().capabilities(printer, refresh)),
+                    capabilities_json(
+                        manager_->print_backend().capabilities(printer, refresh)),
                     {});
             }
 
             if (method == QStringLiteral("printer.jobs")) {
-                const std::string printer = required_string(params, QStringLiteral("printer"));
-                const bool completed = params.value(QStringLiteral("include_completed")).toBool(true);
+                const std::string printer = required_string(
+                    params,
+                    QStringLiteral("printer"));
+                const bool completed = params
+                    .value(QStringLiteral("include_completed"))
+                    .toBool(true);
                 QJsonArray jobs;
-                for (const auto& job : manager_->job_manager().list_jobs(printer, completed)) {
+                for (const auto& job :
+                     manager_->job_manager().list_jobs(printer, completed)) {
                     jobs.append(job_json(job));
                 }
                 return response(
@@ -278,8 +326,12 @@ private:
             }
 
             if (method == QStringLiteral("printer.cancel_job")) {
-                const std::string printer = required_string(params, QStringLiteral("printer"));
-                const int job_id = required_positive_int(params, QStringLiteral("job_id"));
+                const std::string printer = required_string(
+                    params,
+                    QStringLiteral("printer"));
+                const int job_id = required_positive_int(
+                    params,
+                    QStringLiteral("job_id"));
                 const auto job = manager_->job_manager().job(printer, job_id);
                 if (!job.has_value()) {
                     throw std::runtime_error("print job not found");
@@ -287,13 +339,16 @@ private:
 
                 const std::string user = current_username();
                 if (user.empty() || job->user.empty() || job->user != user) {
-                    throw std::runtime_error("refusing to cancel a print job not owned by the local user");
+                    throw std::runtime_error(
+                        "refusing to cancel a print job not owned by the local user");
                 }
                 if (terminal_job(job->state)) {
-                    throw std::runtime_error("print job is already in a terminal state");
+                    throw std::runtime_error(
+                        "print job is already in a terminal state");
                 }
                 if (!manager_->job_manager().cancel(printer, job_id)) {
-                    throw std::runtime_error("CUPS refused print job cancellation");
+                    throw std::runtime_error(
+                        "CUPS refused print job cancellation");
                 }
 
                 return response(
@@ -308,26 +363,108 @@ private:
             }
 
             if (method == QStringLiteral("scanner.capabilities")) {
-                const std::string scanner = required_string(params, QStringLiteral("scanner"));
+                const std::string scanner = required_string(
+                    params,
+                    QStringLiteral("scanner"));
                 return response(
                     id,
                     true,
-                    scanner_capabilities_json(manager_->scan_backend().capabilities(scanner)),
+                    scanner_capabilities_json(
+                        manager_->scan_backend().capabilities(scanner)),
                     {});
             }
 
-            return response(id, false, {}, QStringLiteral("unknown method"));
+            if (method == QStringLiteral("scanner.scan")) {
+                const std::string scanner = required_string(
+                    params,
+                    QStringLiteral("scanner"));
+
+                docsuite::ScanSettings settings;
+                if (params.contains(QStringLiteral("dpi"))) {
+                    settings.dpi = required_positive_int(
+                        params,
+                        QStringLiteral("dpi"));
+                }
+                if (settings.dpi < 75 || settings.dpi > 1200) {
+                    throw std::runtime_error(
+                        "scanner.scan dpi must be between 75 and 1200");
+                }
+
+                const QString mode = params
+                    .value(QStringLiteral("mode"))
+                    .toString(QStringLiteral("Color"));
+                if (mode != QStringLiteral("Color") &&
+                    mode != QStringLiteral("Gray") &&
+                    mode != QStringLiteral("Lineart")) {
+                    throw std::runtime_error(
+                        "scanner.scan mode must be Color, Gray, or Lineart");
+                }
+                settings.mode = mode.toStdString();
+
+                const QString source = params
+                    .value(QStringLiteral("source"))
+                    .toString(QStringLiteral("Flatbed"));
+                if (source.isEmpty() || source.size() > 128) {
+                    throw std::runtime_error(
+                        "scanner.scan source must be a non-empty scanner source name");
+                }
+                settings.source = source.toStdString();
+
+                const auto frame = manager_->scan_backend().scan(scanner, settings);
+                const QString output = QDir(scan_output_directory()).filePath(
+                    QStringLiteral("scan-%1.pnm").arg(
+                        QUuid::createUuid().toString(QUuid::WithoutBraces)));
+                manager_->scan_backend().save_pnm(
+                    frame,
+                    output.toStdString());
+                if (!QFile::setPermissions(
+                        output,
+                        QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+                    QFile::remove(output);
+                    throw std::runtime_error(
+                        "Unable to secure scanner output file");
+                }
+
+                return response(
+                    id,
+                    true,
+                    QJsonObject{
+                        {QStringLiteral("path"), output},
+                        {QStringLiteral("width"), frame.width},
+                        {QStringLiteral("height"), frame.height},
+                        {QStringLiteral("dpi"), frame.dpi},
+                        {QStringLiteral("format"),
+                         frame.format == docsuite::ScanPixelFormat::rgb24
+                             ? QStringLiteral("RGB24")
+                             : QStringLiteral("Gray8")},
+                        {QStringLiteral("bytes"),
+                         static_cast<qint64>(frame.pixels.size())},
+                    },
+                    {});
+            }
+
+            return response(
+                id,
+                false,
+                {},
+                QStringLiteral("unknown method"));
         } catch (const std::exception& error) {
-            return response(id, false, {}, QString::fromUtf8(error.what()));
+            return response(
+                id,
+                false,
+                {},
+                QString::fromUtf8(error.what()));
         }
     }
 
     [[nodiscard]] static std::string required_string(
         const QJsonObject& params,
         const QString& key) {
+
         const QString value = params.value(key).toString();
         if (value.isEmpty()) {
-            throw std::runtime_error("missing required parameter: " + key.toStdString());
+            throw std::runtime_error(
+                "missing required parameter: " + key.toStdString());
         }
         return value.toStdString();
     }
@@ -335,13 +472,16 @@ private:
     [[nodiscard]] static int required_positive_int(
         const QJsonObject& params,
         const QString& key) {
+
         const QJsonValue value = params.value(key);
         if (!value.isDouble()) {
-            throw std::runtime_error("missing integer parameter: " + key.toStdString());
+            throw std::runtime_error(
+                "missing integer parameter: " + key.toStdString());
         }
         const int result = value.toInt(0);
         if (result <= 0) {
-            throw std::runtime_error("parameter must be positive: " + key.toStdString());
+            throw std::runtime_error(
+                "parameter must be positive: " + key.toStdString());
         }
         return result;
     }
@@ -351,6 +491,7 @@ private:
         const bool ok,
         const QJsonObject& result,
         const QString& error) {
+
         QJsonObject object{
             {QStringLiteral("id"), id},
             {QStringLiteral("ok"), ok},
@@ -372,7 +513,8 @@ private:
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
-    QCoreApplication::setApplicationName(QStringLiteral("docsuite-device-service"));
+    QCoreApplication::setApplicationName(
+        QStringLiteral("docsuite-device-service"));
     try {
         Service service;
         return app.exec();
