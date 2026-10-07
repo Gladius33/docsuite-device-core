@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <utility>
 
 namespace docsuite {
 namespace {
@@ -13,7 +14,8 @@ namespace {
 [[nodiscard]] std::string normalized_model(const std::string& value) {
     std::string result;
     result.reserve(value.size());
-    for (const unsigned char ch : value) {
+    for (const char raw : value) {
+        const auto ch = static_cast<unsigned char>(raw);
         if (std::isalnum(ch) != 0) {
             result.push_back(static_cast<char>(std::tolower(ch)));
         }
