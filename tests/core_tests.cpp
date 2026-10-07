@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "docsuite/core/types.hpp"
+#include "docsuite/ocr/tesseract_ocr.hpp"
 #include "docsuite/print/job_manager.hpp"
 
 #include <cassert>
@@ -32,6 +33,16 @@ int main() {
     assert(caps.color_modes.size() == 2U);
     assert(caps.qualities.at(1) == 4);
     assert(caps.copies_max == 99);
+
+    docsuite::ScannerCapabilities scanner_caps{};
+    scanner_caps.scanner = "airscan:test";
+    scanner_caps.modes = {"Color", "Gray"};
+    scanner_caps.resolutions_dpi = {150, 300, 600};
+    scanner_caps.sources = {"Flatbed"};
+    scanner_caps.max_width_mm = 215.9;
+    scanner_caps.max_height_mm = 296.7;
+    assert(scanner_caps.modes.size() == 2U);
+    assert(scanner_caps.resolutions_dpi.at(1) == 300);
 
     docsuite::SupplyLevel unknown_color{
         .name = "Color",
@@ -81,6 +92,21 @@ int main() {
     frame.format = docsuite::ScanPixelFormat::rgb24;
     frame.pixels = {255, 0, 0, 0, 255, 0};
     assert(frame.pixels.size() == 6U);
+
+    docsuite::OcrResult ocr{};
+    ocr.text = "DocSuite";
+    ocr.mean_confidence = 94;
+    ocr.language = "fra+eng";
+    ocr.words.push_back(docsuite::OcrWord{
+        .text = "DocSuite",
+        .confidence = 94.0F,
+        .left = 10,
+        .top = 20,
+        .width = 100,
+        .height = 30,
+    });
+    assert(ocr.words.size() == 1U);
+    assert(ocr.words.front().width == 100);
 
     std::cout << "DocSuite core smoke tests passed\n";
     return 0;
