@@ -19,6 +19,35 @@ int main() {
     mono.color_mode = "monochrome";
     assert(mono.color_mode == "monochrome");
 
+    docsuite::PrinterCapabilities caps{};
+    caps.printer = "test-printer";
+    caps.color_modes = {"color", "monochrome"};
+    caps.sides = {"one-sided", "two-sided-long-edge"};
+    caps.qualities = {3, 4, 5};
+    caps.resolutions_dpi = {600};
+    caps.copies_min = 1;
+    caps.copies_max = 99;
+    assert(caps.color_modes.size() == 2U);
+    assert(caps.qualities.at(1) == 4);
+    assert(caps.copies_max == 99);
+
+    docsuite::SupplyLevel unknown_color{
+        .name = "Color",
+        .type = "ink-cartridge",
+        .percent = std::nullopt,
+        .low_threshold = 15,
+    };
+    assert(!unknown_color.percent.has_value());
+
+    docsuite::SupplyLevel low_black{
+        .name = "Black",
+        .type = "ink-cartridge",
+        .percent = 10,
+        .low_threshold = 15,
+    };
+    assert(low_black.percent.has_value());
+    assert(*low_black.percent <= low_black.low_threshold);
+
     std::cout << "DocSuite core smoke tests passed\n";
     return 0;
 }
