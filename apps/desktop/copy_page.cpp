@@ -5,7 +5,6 @@
 #include "copy_page.hpp"
 
 #include <QComboBox>
-#include <QDir>
 #include <QFormLayout>
 #include <QFutureWatcher>
 #include <QGroupBox>
@@ -14,12 +13,10 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSpinBox>
-#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
-#include <algorithm>
 #include <exception>
 #include <memory>
 #include <stdexcept>
@@ -44,8 +41,8 @@ namespace {
 }
 
 struct CopyResult {
-    int first_job_id{0};
-    int jobs_submitted{0};
+    int job_id{0};
+    int copies_requested{0};
     int width{0};
     int height{0};
 };
@@ -158,7 +155,7 @@ void CopyPage::refresh_devices() {
                 copy_->setEnabled(ready);
                 status_->setText(
                     ready
-                        ? QStringLiteral("Ready — scan is acquired once and submitted to CUPS for each requested copy.")
+                        ? QStringLiteral("Ready — the source is scanned once and submitted as one CUPS job with the requested copy count.")
                         : QStringLiteral("A scanner and a printer are required."));
             } catch (const std::exception& error) {
                 status_->setText(
@@ -188,8 +185,8 @@ void CopyPage::start_copy() {
     profile.color_mode = print_mode_->currentData().toString().toStdString();
     profile.sides = duplex_->currentData().toString().toStdString();
     profile.quality = 4;
+    profile.copies = copies_->value();
 
-    const int copies = copies_->value();
     copy_->setEnabled(false);
     refresh_->setEnabled(false);
     status_->setText(QStringLiteral("Scanning source page…"));
@@ -200,11 +197,11 @@ void CopyPage::start_copy() {
             try {
                 const auto result = watcher->result();
                 status_->setText(
-                    QStringLiteral("Copy submitted — %1 job(s), source %2 × %3 px, first job #%4")
-                        .arg(result.jobs_submitted)
+                    QStringLiteral("Copy submitted — job #%1, %2 copy/copies, source %3 × %4 px")
+                        .arg(result.job_id)
+                        .arg(result.copies_requested)
                         .arg(result.width)
-                        .arg(result.height)
-                        .arg(result.first_job_id));
+                        .arg(result.height));
             } catch (const std::exception& error) {
                 status_->setText(
                     QStringLiteral("Copy error: %1").arg(QString::fromUtf8(error.what())));
@@ -217,7 +214,7 @@ void CopyPage::start_copy() {
     const std::string scanner_name = scanner.toStdString();
     const std::string printer_name = printer.toStdString();
     watcher->setFuture(QtConcurrent::run(
-        [manager = manager_, scanner_name, printer_name, settings, profile, copies]() {
+        [manager = manager_, scanner_name, printer_name, settings, profile]() {
             const ScanFrame frame = manager->scan_backend().scan(scanner_name, settings);
             const QImage image = image_from_frame(frame);
 
@@ -233,17 +230,12 @@ void CopyPage::start_copy() {
             CopyResult result;
             result.width = frame.width;
             result.height = frame.height;
-            for (int copy = 0; copy < copies; ++copy) {
-                const int job = manager->print_backend().print_file(
-                    printer_name,
-                    path.toStdString(),
-                    "DocSuite copy",
-                    profile);
-                if (result.first_job_id == 0) {
-                    result.first_job_id = job;
-                }
-                ++result.jobs_submitted;
-            }
+            result.copies_requested = profile.copies;
+            result.job_id = manager->print_backend().print_file_advanced(
+                printer_name,
+                path.toStdString(),
+                "DocSuite copy",
+                profile);
             return result;
         }));
 }
