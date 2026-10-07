@@ -1,0 +1,35 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#pragma once
+
+#include "docsuite/device/device_manager.hpp"
+
+#include <QWidget>
+
+#include <memory>
+
+class QLabel;
+class QListWidget;
+class QPushButton;
+class QTextEdit;
+
+namespace docsuite::desktop {
+
+class DevicesPage final : public QWidget {
+public:
+    explicit DevicesPage(std::shared_ptr<DeviceManager> manager, QWidget* parent = nullptr);
+    void refresh();
+
+private:
+    void load_printer_details(const QString& printer_name);
+
+    std::shared_ptr<DeviceManager> manager_;
+    QLabel* summary_{nullptr};
+    QPushButton* refresh_button_{nullptr};
+    QListWidget* printers_{nullptr};
+    QListWidget* scanners_{nullptr};
+    QTextEdit* details_{nullptr};
+};
+
+} // namespace docsuite::desktop
