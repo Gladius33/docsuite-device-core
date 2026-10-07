@@ -4,30 +4,16 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace docsuite {
 
-enum class DeviceState {
-    unknown,
-    idle,
-    processing,
-    stopped,
-    offline
-};
-
-enum class PrintJobState {
-    unknown,
-    pending,
-    held,
-    processing,
-    stopped,
-    canceled,
-    aborted,
-    completed
-};
+enum class DeviceState { unknown, idle, processing, stopped, offline };
+enum class PrintJobState { unknown, pending, held, processing, stopped, canceled, aborted, completed };
+enum class ScanPixelFormat { gray8, rgb24 };
 
 struct PrinterInfo {
     std::string name;
@@ -123,6 +109,20 @@ struct PrintJobTrace {
     std::optional<std::chrono::milliseconds> total_duration;
     bool timed_out{false};
     std::string history_path;
+};
+
+struct ScanSettings {
+    int dpi{300};
+    std::string mode{"Color"};
+    std::string source{"Flatbed"};
+};
+
+struct ScanFrame {
+    int width{0};
+    int height{0};
+    int dpi{0};
+    ScanPixelFormat format{ScanPixelFormat::rgb24};
+    std::vector<std::uint8_t> pixels;
 };
 
 } // namespace docsuite
