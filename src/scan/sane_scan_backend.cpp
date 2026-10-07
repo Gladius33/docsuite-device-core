@@ -7,10 +7,11 @@
 #include <sane/sane.h>
 
 #include <stdexcept>
+#include <string_view>
 
 namespace docsuite {
 
-std::vector<ScannerInfo> SaneScanBackend::list_scanners() const {
+std::vector<ScannerInfo> SaneScanBackend::list_scanners(const bool include_virtual) const {
     SANE_Int version_code = 0;
     const SANE_Status init_status = sane_init(&version_code, nullptr);
     if (init_status != SANE_STATUS_GOOD) {
@@ -28,11 +29,21 @@ std::vector<ScannerInfo> SaneScanBackend::list_scanners() const {
     if (devices != nullptr) {
         for (std::size_t i = 0; devices[i] != nullptr; ++i) {
             const SANE_Device& device = *devices[i];
+            const std::string name = device.name != nullptr ? device.name : "";
+            const std::string type = device.type != nullptr ? device.type : "";
+
+            const bool virtual_camera = name.rfind("v4l:", 0) == 0 ||
+                std::string_view{type}.find("virtual") != std::string_view::npos;
+            if (!include_virtual && virtual_camera) {
+                continue;
+            }
+
             result.push_back(ScannerInfo{
-                .name = device.name != nullptr ? device.name : "",
+                .name = name,
                 .vendor = device.vendor != nullptr ? device.vendor : "",
                 .model = device.model != nullptr ? device.model : "",
-                .type = device.type != nullptr ? device.type : "",
+                .type = type,
+                .backend = "SANE",
             });
         }
     }
