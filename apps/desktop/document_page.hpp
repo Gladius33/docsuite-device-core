@@ -4,14 +4,17 @@
 #pragma once
 
 #include "docsuite/device/device_manager.hpp"
+#include "docsuite/image/image_processor.hpp"
 #include "docsuite/ocr/tesseract_ocr.hpp"
 #include "pdf_export.hpp"
 
 #include <QWidget>
 
 #include <memory>
+#include <string>
 #include <vector>
 
+class QCheckBox;
 class QComboBox;
 class QLabel;
 class QListWidget;
@@ -32,23 +35,31 @@ private:
     void move_selected(int delta);
     void clear_pages();
     void run_ocr_selected();
+    void transform_selected(const std::string& operation);
     void export_pdf();
     void update_list();
     void update_preview();
 
     std::shared_ptr<DeviceManager> manager_;
     TesseractOcr ocr_{};
+    ImageProcessor processor_{};
     std::vector<PdfScanPage> pages_{};
 
     QComboBox* scanner_{nullptr};
     QComboBox* mode_{nullptr};
     QComboBox* dpi_{nullptr};
     QComboBox* source_{nullptr};
+    QCheckBox* auto_process_{nullptr};
+    QCheckBox* skip_blank_{nullptr};
     QPushButton* refresh_{nullptr};
     QPushButton* add_{nullptr};
     QPushButton* delete_{nullptr};
     QPushButton* up_{nullptr};
     QPushButton* down_{nullptr};
+    QPushButton* auto_crop_{nullptr};
+    QPushButton* enhance_{nullptr};
+    QPushButton* binarize_{nullptr};
+    QPushButton* deskew_{nullptr};
     QPushButton* ocr_{nullptr};
     QPushButton* export_{nullptr};
     QPushButton* clear_{nullptr};
