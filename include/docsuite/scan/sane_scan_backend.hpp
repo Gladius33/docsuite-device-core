@@ -5,6 +5,7 @@
 
 #include "docsuite/core/types.hpp"
 
+#include <string>
 #include <vector>
 
 namespace docsuite {
@@ -12,6 +13,12 @@ namespace docsuite {
 class SaneScanBackend {
 public:
     [[nodiscard]] std::vector<ScannerInfo> list_scanners(bool include_virtual = false) const;
+
+    [[nodiscard]] ScanFrame scan(
+        const std::string& scanner_name,
+        const ScanSettings& settings = {}) const;
+
+    void save_pnm(const ScanFrame& frame, const std::string& path) const;
 };
 
 } // namespace docsuite
