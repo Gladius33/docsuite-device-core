@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QTimer>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -16,5 +17,10 @@ int main(int argc, char** argv) {
 
     docsuite::desktop::MainWindow window;
     window.show();
+
+    if (QCoreApplication::arguments().contains(QStringLiteral("--smoke-test"))) {
+        QTimer::singleShot(1200, &app, &QCoreApplication::quit);
+    }
+
     return app.exec();
 }
