@@ -41,6 +41,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DDOCSUITE_BUILD_DESKTOP=ON
+          -DDOCSUITE_BUILD_SERVICE=ON
           -DDOCSUITE_BUILD_TESTS=ON
           -DDOCSUITE_ENABLE_OCR=ON
 
@@ -61,3 +62,22 @@ jobs:
           name: docsuite-device-core-deb
           path: build/*.deb
           if-no-files-found: error
+
+  mcp:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install MCP dependencies
+        working-directory: integrations/mcp
+        run: npm install --no-audit --no-fund
+
+      - name: Type-check MCP sidecar
+        working-directory: integrations/mcp
+        run: npm run build
