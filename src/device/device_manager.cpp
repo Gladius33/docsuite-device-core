@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,11 @@
 
 namespace docsuite {
 namespace {
+
+[[nodiscard]] bool smoke_test_mode() {
+    const char* value = std::getenv("DOCSUITE_SMOKE_TEST");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
 
 [[nodiscard]] std::string normalized_model(const std::string& value) {
     std::string result;
@@ -158,6 +164,10 @@ void append_unique_scanner(std::vector<ScannerInfo>& scanners, ScannerInfo candi
 } // namespace
 
 DeviceSnapshot DeviceManager::snapshot() const {
+    if (smoke_test_mode()) {
+        return {};
+    }
+
     auto printers = print_backend_.list_printers();
     const auto sane_scanners = sane_backend_.list_scanners();
 
