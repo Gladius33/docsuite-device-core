@@ -78,6 +78,8 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/main.cpp
         apps/desktop/device_center_window.cpp
         apps/desktop/device_center_window.hpp
+        apps/desktop/pdf_export.cpp
+        apps/desktop/pdf_export.hpp
     )
     target_link_libraries(
         docsuite-device-center
