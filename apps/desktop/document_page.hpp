@@ -39,9 +39,11 @@ private:
     void run_ocr_selected();
     void transform_selected(const std::string& operation);
     void crop_selection();
+    void undo_selected();
     void export_pdf();
     void update_list();
     void update_preview();
+    void set_page_editing_busy(bool busy);
 
     std::shared_ptr<DeviceManager> manager_;
     TesseractOcr ocr_engine_{};
@@ -61,6 +63,9 @@ private:
     QPushButton* down_{nullptr};
     QPushButton* auto_crop_{nullptr};
     QPushButton* crop_selection_{nullptr};
+    QPushButton* rotate_left_{nullptr};
+    QPushButton* rotate_right_{nullptr};
+    QPushButton* undo_{nullptr};
     QPushButton* enhance_{nullptr};
     QPushButton* binarize_{nullptr};
     QPushButton* deskew_{nullptr};
