@@ -10,6 +10,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace docsuite {
 namespace {
@@ -33,6 +35,48 @@ void add_nonempty_option(
     return message.str();
 }
 
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> profile_options(
+    const PrintProfile& profile) {
+
+    std::vector<std::pair<std::string, std::string>> options;
+    if (!profile.media.empty()) {
+        options.emplace_back("media", profile.media);
+    }
+    if (!profile.color_mode.empty()) {
+        options.emplace_back("print-color-mode", profile.color_mode);
+    }
+    if (!profile.sides.empty()) {
+        options.emplace_back("sides", profile.sides);
+    }
+    if (profile.quality > 0) {
+        options.emplace_back("print-quality", std::to_string(profile.quality));
+    }
+    if (!profile.media_source.empty()) {
+        options.emplace_back("media-source", profile.media_source);
+    }
+    if (!profile.media_type.empty()) {
+        options.emplace_back("media-type", profile.media_type);
+    }
+    if (profile.copies > 0) {
+        options.emplace_back("copies", std::to_string(profile.copies));
+    }
+    return options;
+}
+
+void append_option_pairs(
+    std::vector<std::string>& output,
+    const char* prefix,
+    const int count,
+    cups_option_t* options) {
+
+    for (int i = 0; i < count; ++i) {
+        const char* name = options[i].name != nullptr ? options[i].name : "?";
+        const char* value = options[i].value != nullptr ? options[i].value : "?";
+        output.emplace_back(
+            std::string{prefix} + name + "=" + value);
+    }
+}
+
 } // namespace
 
 PrintPreflightResult CupsPrintBackend::preflight(
@@ -43,6 +87,105 @@ PrintPreflightResult CupsPrintBackend::preflight(
     return validate_print_profile(
         capabilities(printer, force_refresh),
         profile);
+}
+
+PrintPreflightResult CupsPrintBackend::preflight_detailed(
+    const std::string& printer,
+    const PrintProfile& profile,
+    const bool force_refresh) const {
+
+    PrintPreflightResult result = preflight(printer, profile, force_refresh);
+    if (!result.ok) {
+        return result;
+    }
+
+    cups_dest_t* destination = cupsGetNamedDest(
+        CUPS_HTTP_DEFAULT,
+        printer.c_str(),
+        nullptr);
+    if (destination == nullptr) {
+        result.ok = false;
+        result.errors.emplace_back("CUPS destination not found: " + printer);
+        return result;
+    }
+
+    cups_dinfo_t* info = cupsCopyDestInfo(CUPS_HTTP_DEFAULT, destination);
+    if (info == nullptr) {
+        cupsFreeDests(1, destination);
+        result.warnings.emplace_back(
+            "CUPS detailed destination information is unavailable; cross-option conflicts were not checked");
+        return result;
+    }
+
+    cups_option_t* accepted = nullptr;
+    int accepted_count = 0;
+
+    for (const auto& [name, value] : profile_options(profile)) {
+        if (cupsCheckDestSupported(
+                CUPS_HTTP_DEFAULT,
+                destination,
+                info,
+                name.c_str(),
+                value.c_str()) == 0) {
+            result.errors.emplace_back(
+                "CUPS does not report support for " + name + "='" + value + "'");
+            continue;
+        }
+
+        cups_option_t* conflicts = nullptr;
+        int conflict_count = 0;
+        cups_option_t* resolved = nullptr;
+        int resolved_count = 0;
+
+        const int conflict = cupsCopyDestConflicts(
+            CUPS_HTTP_DEFAULT,
+            destination,
+            info,
+            accepted_count,
+            accepted,
+            name.c_str(),
+            value.c_str(),
+            &conflict_count,
+            &conflicts,
+            &resolved_count,
+            &resolved);
+
+        if (conflict < 0) {
+            result.warnings.emplace_back(
+                "CUPS could not evaluate cross-option constraints for " +
+                name + "='" + value + "'");
+        } else if (conflict > 0) {
+            result.errors.emplace_back(
+                "CUPS reports an option conflict when applying " +
+                name + "='" + value + "'");
+            append_option_pairs(
+                result.errors,
+                "conflict: ",
+                conflict_count,
+                conflicts);
+            append_option_pairs(
+                result.warnings,
+                "CUPS suggested resolution: ",
+                resolved_count,
+                resolved);
+        } else {
+            accepted_count = cupsAddOption(
+                name.c_str(),
+                value.c_str(),
+                accepted_count,
+                &accepted);
+        }
+
+        cupsFreeOptions(conflict_count, conflicts);
+        cupsFreeOptions(resolved_count, resolved);
+    }
+
+    cupsFreeOptions(accepted_count, accepted);
+    cupsFreeDestInfo(info);
+    cupsFreeDests(1, destination);
+
+    result.ok = result.errors.empty();
+    return result;
 }
 
 int CupsPrintBackend::print_file_advanced(
