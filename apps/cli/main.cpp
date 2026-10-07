@@ -19,7 +19,8 @@ void print_usage() {
         << "docsuite-device-cli jobs <printer> [active]\n"
         << "docsuite-device-cli cancel <printer> <job-id>\n"
         << "docsuite-device-cli print <printer> <file> [color|mono]\n"
-        << "docsuite-device-cli diagnose-print <printer> <file> [color|mono]\n";
+        << "docsuite-device-cli diagnose-print <printer> <file> [color|mono]\n"
+        << "docsuite-device-cli scan <scanner> <output.pnm> [dpi] [color|gray]\n";
 }
 
 const char* state_name(const docsuite::DeviceState state) {
@@ -99,15 +100,9 @@ int main(int argc, char** argv) {
             std::cout << "Printers:\n";
             for (const auto& printer : snapshot.printers) {
                 std::cout << "  - " << printer.name;
-                if (printer.is_default) {
-                    std::cout << " [default]";
-                }
-                if (!printer.model.empty()) {
-                    std::cout << " | " << printer.model;
-                }
-                if (!printer.uri.empty()) {
-                    std::cout << " | " << printer.uri;
-                }
+                if (printer.is_default) std::cout << " [default]";
+                if (!printer.model.empty()) std::cout << " | " << printer.model;
+                if (!printer.uri.empty()) std::cout << " | " << printer.uri;
                 std::cout << '\n';
             }
 
@@ -117,19 +112,14 @@ int main(int argc, char** argv) {
                           << " | " << scanner.vendor
                           << " | " << scanner.model
                           << " | " << scanner.type;
-                if (!scanner.backend.empty()) {
-                    std::cout << " | " << scanner.backend;
-                }
+                if (!scanner.backend.empty()) std::cout << " | " << scanner.backend;
                 std::cout << '\n';
             }
             return 0;
         }
 
         if (command == "capabilities") {
-            if (argc < 3) {
-                print_usage();
-                return 2;
-            }
+            if (argc < 3) { print_usage(); return 2; }
             const bool refresh = argc >= 4 && std::string{argv[3]} == "--refresh";
             const auto caps = manager.print_backend().capabilities(argv[2], refresh);
 
@@ -144,17 +134,12 @@ int main(int argc, char** argv) {
             print_strings("Document formats", caps.document_formats);
             std::cout << "Copies: " << caps.copies_min << '-' << caps.copies_max << '\n';
             std::cout << "Media (" << caps.media.size() << "):\n";
-            for (const auto& medium : caps.media) {
-                std::cout << "  - " << medium << '\n';
-            }
+            for (const auto& medium : caps.media) std::cout << "  - " << medium << '\n';
             return 0;
         }
 
         if (command == "status") {
-            if (argc < 3) {
-                print_usage();
-                return 2;
-            }
+            if (argc < 3) { print_usage(); return 2; }
             const auto status = manager.print_backend().status(argv[2]);
             std::cout << "Printer: " << status.printer << '\n'
                       << "Source: " << status.source << '\n'
@@ -162,29 +147,18 @@ int main(int argc, char** argv) {
                       << "Accepting jobs: " << (status.accepting_jobs ? "yes" : "no") << '\n';
 
             std::cout << "Reasons:";
-            if (status.reasons.empty()) {
-                std::cout << " none";
-            } else {
-                for (const auto& reason : status.reasons) {
-                    std::cout << ' ' << reason;
-                }
-            }
+            if (status.reasons.empty()) std::cout << " none";
+            else for (const auto& reason : status.reasons) std::cout << ' ' << reason;
             std::cout << '\n';
 
             std::cout << "Supplies:\n";
-            if (status.supplies.empty()) {
-                std::cout << "  (not reported)\n";
-            }
+            if (status.supplies.empty()) std::cout << "  (not reported)\n";
             for (const auto& supply : status.supplies) {
                 std::cout << "  - " << supply.name;
-                if (!supply.type.empty()) {
-                    std::cout << " | " << supply.type;
-                }
+                if (!supply.type.empty()) std::cout << " | " << supply.type;
                 if (supply.percent.has_value()) {
                     std::cout << " | " << *supply.percent << '%';
-                    if (*supply.percent <= supply.low_threshold) {
-                        std::cout << " [low]";
-                    }
+                    if (*supply.percent <= supply.low_threshold) std::cout << " [low]";
                 } else {
                     std::cout << " | level unavailable";
                 }
@@ -194,10 +168,7 @@ int main(int argc, char** argv) {
         }
 
         if (command == "jobs") {
-            if (argc < 3) {
-                print_usage();
-                return 2;
-            }
+            if (argc < 3) { print_usage(); return 2; }
             const bool include_completed = !(argc >= 4 && std::string{argv[3]} == "active");
             const auto jobs = manager.job_manager().list_jobs(argv[2], include_completed);
             std::cout << "Jobs: " << jobs.size() << '\n';
@@ -206,46 +177,31 @@ int main(int argc, char** argv) {
                           << " | " << docsuite::print_job_state_name(job.state)
                           << " | " << job.title
                           << " | " << job.size_kib << " KiB";
-                if (!job.format.empty()) {
-                    std::cout << " | " << job.format;
-                }
+                if (!job.format.empty()) std::cout << " | " << job.format;
                 std::cout << '\n';
             }
             return 0;
         }
 
         if (command == "cancel") {
-            if (argc < 4) {
-                print_usage();
-                return 2;
-            }
+            if (argc < 4) { print_usage(); return 2; }
             const int job_id = std::stoi(argv[3]);
             const bool canceled = manager.job_manager().cancel(argv[2], job_id);
-            std::cout << (canceled ? "Canceled" : "Cancel failed")
-                      << " job " << job_id << '\n';
+            std::cout << (canceled ? "Canceled" : "Cancel failed") << " job " << job_id << '\n';
             return canceled ? 0 : 1;
         }
 
         if (command == "print") {
-            if (argc < 4) {
-                print_usage();
-                return 2;
-            }
-
+            if (argc < 4) { print_usage(); return 2; }
             const auto profile = profile_from_arg(argc, argv, 4);
             const int job_id = manager.print_backend().print_file(
                 argv[2], argv[3], "DocSuite print job", profile);
-
             std::cout << "Submitted CUPS job " << job_id << '\n';
             return 0;
         }
 
         if (command == "diagnose-print") {
-            if (argc < 4) {
-                print_usage();
-                return 2;
-            }
-
+            if (argc < 4) { print_usage(); return 2; }
             const auto profile = profile_from_arg(argc, argv, 4);
             const auto trace = manager.job_manager().diagnose_print(
                 argv[2], argv[3], "DocSuite diagnostic print", profile);
@@ -255,23 +211,35 @@ int main(int argc, char** argv) {
                       << "Final state: " << docsuite::print_job_state_name(trace.final_state) << '\n'
                       << "Submit -> CUPS accepted: " << trace.submit_to_accept.count() << " ms\n"
                       << "Timeline:\n";
-
             for (const auto& event : trace.events) {
                 std::cout << "  +" << event.since_submit.count() << " ms"
                           << " | " << event.name
-                          << " | " << docsuite::print_job_state_name(event.state)
-                          << '\n';
+                          << " | " << docsuite::print_job_state_name(event.state) << '\n';
             }
-
             print_optional_duration("CUPS queue delay", trace.queue_delay);
             print_optional_duration("CUPS processing duration", trace.processing_duration);
             print_optional_duration("CUPS total duration", trace.total_duration);
             std::cout << "Timed out: " << (trace.timed_out ? "yes" : "no") << '\n';
-            if (!trace.history_path.empty()) {
-                std::cout << "History: " << trace.history_path << '\n';
-            }
-
+            if (!trace.history_path.empty()) std::cout << "History: " << trace.history_path << '\n';
             return trace.final_state == docsuite::PrintJobState::completed ? 0 : 1;
+        }
+
+        if (command == "scan") {
+            if (argc < 4) { print_usage(); return 2; }
+
+            docsuite::ScanSettings settings;
+            if (argc >= 5) settings.dpi = std::stoi(argv[4]);
+            if (argc >= 6 && std::string{argv[5]} == "gray") settings.mode = "Gray";
+
+            const auto frame = manager.scan_backend().scan(argv[2], settings);
+            manager.scan_backend().save_pnm(frame, argv[3]);
+
+            std::cout << "Scan saved: " << argv[3] << '\n'
+                      << "Size: " << frame.width << 'x' << frame.height << '\n'
+                      << "DPI: " << frame.dpi << '\n'
+                      << "Mode: " << (frame.format == docsuite::ScanPixelFormat::rgb24 ? "RGB24" : "Gray8") << '\n'
+                      << "Bytes: " << frame.pixels.size() << '\n';
+            return 0;
         }
 
         print_usage();
