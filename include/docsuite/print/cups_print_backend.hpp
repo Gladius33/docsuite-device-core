@@ -29,6 +29,12 @@ public:
         const std::string& title,
         const PrintProfile& profile) const;
 
+    [[nodiscard]] int print_file_advanced(
+        const std::string& printer,
+        const std::string& path,
+        const std::string& title,
+        const PrintProfile& profile) const;
+
     void clear_capability_cache() const;
 
 private:
