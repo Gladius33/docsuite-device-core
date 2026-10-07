@@ -93,13 +93,15 @@ if(DOCSUITE_BUILD_SERVICE)
 endif()
 
 if(DOCSUITE_BUILD_DESKTOP)
-    find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent)
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent Network)
     qt_standard_project_setup()
     qt_add_executable(
         docsuite-device-center
         apps/desktop/main.cpp
         apps/desktop/main_window.cpp
         apps/desktop/main_window.hpp
+        apps/desktop/device_service_gateway.cpp
+        apps/desktop/device_service_gateway.hpp
         apps/desktop/devices_page.cpp
         apps/desktop/devices_page.hpp
         apps/desktop/scan_page.cpp
@@ -115,7 +117,14 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/pdf_export.cpp
         apps/desktop/pdf_export.hpp
     )
-    target_link_libraries(docsuite-device-center PRIVATE DocSuite::DeviceCore Qt6::Widgets Qt6::Concurrent)
+    target_link_libraries(
+        docsuite-device-center
+        PRIVATE
+            DocSuite::DeviceCore
+            Qt6::Widgets
+            Qt6::Concurrent
+            Qt6::Network
+    )
     set_target_properties(docsuite-device-center PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/desktop
     )
