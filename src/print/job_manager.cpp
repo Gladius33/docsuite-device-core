@@ -250,7 +250,7 @@ PrintJobTrace JobManager::diagnose_print(
         .since_submit = std::chrono::milliseconds{0},
     });
 
-    trace.job_id = backend_.print_file(printer, path, title, profile);
+    trace.job_id = backend_.print_file_advanced(printer, path, title, profile);
 
     const auto accepted_system = std::chrono::system_clock::now();
     const auto accepted_steady = std::chrono::steady_clock::now();
