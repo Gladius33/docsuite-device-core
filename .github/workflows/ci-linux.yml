@@ -128,10 +128,23 @@ jobs:
               },
           })
           assert invalid_dpi['ok'] is False, invalid_dpi
-          assert '75 and 1200' in invalid_dpi['error'], invalid_dpi
+          assert 'dpi' in invalid_dpi['error'], invalid_dpi
+          assert 'bounds' in invalid_dpi['error'], invalid_dpi
+
+          fractional_dpi = rpc({
+              'id': 3,
+              'method': 'scanner.scan',
+              'params': {
+                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'dpi': 300.5,
+                  'mode': 'Color',
+              },
+          })
+          assert fractional_dpi['ok'] is False, fractional_dpi
+          assert 'dpi' in fractional_dpi['error'], fractional_dpi
 
           invalid_mode = rpc({
-              'id': 3,
+              'id': 4,
               'method': 'scanner.scan',
               'params': {
                   'scanner': 'escl:http://127.0.0.1:18081',
@@ -142,14 +155,27 @@ jobs:
           assert invalid_mode['ok'] is False, invalid_mode
           assert 'Color, Gray, or Lineart' in invalid_mode['error'], invalid_mode
 
-          unknown = rpc({'id': 4, 'method': 'system.shell', 'params': {'command': 'id'}})
+          unknown = rpc({'id': 5, 'method': 'system.shell', 'params': {'command': 'id'}})
           assert unknown['ok'] is False, unknown
           assert unknown['error'] == 'unknown method', unknown
+
+          with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+              client.connect(socket_path)
+              client.sendall(b'{"id":6,"method":"ping","padding":"' + b'x' * 70000 + b'"}\n')
+              oversized_data = b''
+              while b'\n' not in oversized_data:
+                  chunk = client.recv(4096)
+                  if not chunk:
+                      break
+                  oversized_data += chunk
+          oversized = json.loads(oversized_data.split(b'\n', 1)[0])
+          assert oversized['ok'] is False, oversized
+          assert '64 KiB' in oversized['error'], oversized
 
           requested_escape = '/tmp/docsuite-must-not-write-here.pnm'
           Path(requested_escape).unlink(missing_ok=True)
           scan = rpc({
-              'id': 5,
+              'id': 7,
               'method': 'scanner.scan',
               'params': {
                   'scanner': 'escl:http://127.0.0.1:18081',
@@ -159,7 +185,7 @@ jobs:
                   'path': requested_escape,
               },
           })
-          assert scan['id'] == 5, scan
+          assert scan['id'] == 7, scan
           assert scan['ok'] is True, scan
           result = scan['result']
           assert result['width'] == 4, result
