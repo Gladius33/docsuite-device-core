@@ -89,6 +89,12 @@ struct PrintProfile {
     int copies{1};
 };
 
+struct PrintPreflightResult {
+    bool ok{true};
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings;
+};
+
 struct PrintJobInfo {
     int id{0};
     std::string printer;
