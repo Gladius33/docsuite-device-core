@@ -8,6 +8,7 @@
 #include <QWidget>
 
 #include <memory>
+#include <optional>
 
 class QComboBox;
 class QLabel;
@@ -29,11 +30,13 @@ private:
     void browse_file();
     void refresh_capabilities(bool force_refresh = false);
     void apply_preset();
+    void update_preflight();
     void submit(bool diagnostic);
     void cancel_selected();
     [[nodiscard]] PrintProfile selected_profile() const;
 
     std::shared_ptr<DeviceManager> manager_;
+    std::optional<PrinterCapabilities> last_capabilities_;
     QComboBox* printer_{nullptr};
     QLineEdit* file_{nullptr};
     QComboBox* preset_{nullptr};
@@ -45,6 +48,7 @@ private:
     QComboBox* media_type_{nullptr};
     QSpinBox* copies_{nullptr};
     QLabel* capabilities_status_{nullptr};
+    QLabel* preflight_status_{nullptr};
     QPushButton* refresh_printers_{nullptr};
     QPushButton* refresh_capabilities_{nullptr};
     QPushButton* print_{nullptr};
