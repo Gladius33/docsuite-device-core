@@ -15,15 +15,19 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSignalBlocker>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <optional>
@@ -68,6 +72,54 @@ namespace {
     return text;
 }
 
+[[nodiscard]] QString pretty_keyword(const std::string& value) {
+    QString text = QString::fromStdString(value);
+    text.replace(QLatin1Char('-'), QLatin1Char(' '));
+    text.replace(QLatin1Char('_'), QLatin1Char(' '));
+    return text;
+}
+
+void populate_strings(
+    QComboBox* combo,
+    const std::vector<std::string>& values,
+    const QString& preferred,
+    const bool allow_automatic) {
+
+    const QSignalBlocker blocker{combo};
+    combo->clear();
+    if (allow_automatic) {
+        combo->addItem(QStringLiteral("Automatic"), QString{});
+    }
+    for (const auto& value : values) {
+        combo->addItem(pretty_keyword(value), QString::fromStdString(value));
+    }
+
+    int index = preferred.isEmpty() ? -1 : combo->findData(preferred);
+    if (index < 0 && combo->count() > 0) {
+        index = 0;
+    }
+    if (index >= 0) {
+        combo->setCurrentIndex(index);
+    }
+    combo->setEnabled(!values.empty());
+}
+
+void select_if_available(QComboBox* combo, const QVariant& value) {
+    const int index = combo->findData(value);
+    if (index >= 0) {
+        combo->setCurrentIndex(index);
+    }
+}
+
+[[nodiscard]] QString quality_label(const int quality) {
+    switch (quality) {
+        case 3: return QStringLiteral("Draft");
+        case 4: return QStringLiteral("Normal");
+        case 5: return QStringLiteral("High");
+        default: return QStringLiteral("Quality %1").arg(quality);
+    }
+}
+
 } // namespace
 
 PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
@@ -79,11 +131,22 @@ PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
     auto* form = new QFormLayout(print_group);
     printer_ = new QComboBox(print_group);
     file_ = new QLineEdit(print_group);
-    profile_ = new QComboBox(print_group);
-    profile_->addItem(QStringLiteral("Standard color"), QStringLiteral("color"));
-    profile_->addItem(QStringLiteral("Document monochrome"), QStringLiteral("mono"));
-    profile_->addItem(QStringLiteral("Economy mono duplex"), QStringLiteral("economy"));
-    profile_->addItem(QStringLiteral("High quality color"), QStringLiteral("high"));
+
+    preset_ = new QComboBox(print_group);
+    preset_->addItem(QStringLiteral("Standard color"), QStringLiteral("color"));
+    preset_->addItem(QStringLiteral("Document monochrome"), QStringLiteral("mono"));
+    preset_->addItem(QStringLiteral("Economy mono duplex"), QStringLiteral("economy"));
+    preset_->addItem(QStringLiteral("High quality color"), QStringLiteral("high"));
+    preset_->addItem(QStringLiteral("Custom"), QStringLiteral("custom"));
+
+    color_ = new QComboBox(print_group);
+    sides_ = new QComboBox(print_group);
+    quality_ = new QComboBox(print_group);
+    media_ = new QComboBox(print_group);
+    source_ = new QComboBox(print_group);
+    media_type_ = new QComboBox(print_group);
+    copies_ = new QSpinBox(print_group);
+    copies_->setRange(1, 1);
 
     auto* file_row = new QWidget(print_group);
     auto* file_row_layout = new QHBoxLayout(file_row);
@@ -95,13 +158,26 @@ PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
     auto* printer_row = new QWidget(print_group);
     auto* printer_row_layout = new QHBoxLayout(printer_row);
     printer_row_layout->setContentsMargins(0, 0, 0, 0);
-    refresh_printers_ = new QPushButton(QStringLiteral("Refresh"), printer_row);
+    refresh_printers_ = new QPushButton(QStringLiteral("Refresh printers"), printer_row);
+    refresh_capabilities_ = new QPushButton(QStringLiteral("Refresh capabilities"), printer_row);
     printer_row_layout->addWidget(printer_, 1);
     printer_row_layout->addWidget(refresh_printers_);
+    printer_row_layout->addWidget(refresh_capabilities_);
+
+    capabilities_status_ = new QLabel(QStringLiteral("Capabilities not loaded yet"), print_group);
+    capabilities_status_->setWordWrap(true);
 
     form->addRow(QStringLiteral("Printer"), printer_row);
     form->addRow(QStringLiteral("File"), file_row);
-    form->addRow(QStringLiteral("Profile"), profile_);
+    form->addRow(QStringLiteral("Preset"), preset_);
+    form->addRow(QStringLiteral("Color"), color_);
+    form->addRow(QStringLiteral("Duplex"), sides_);
+    form->addRow(QStringLiteral("Quality"), quality_);
+    form->addRow(QStringLiteral("Paper"), media_);
+    form->addRow(QStringLiteral("Paper source"), source_);
+    form->addRow(QStringLiteral("Media type"), media_type_);
+    form->addRow(QStringLiteral("Copies"), copies_);
+    form->addRow(QStringLiteral("IPP capabilities"), capabilities_status_);
 
     auto* submit_row = new QHBoxLayout();
     print_ = new QPushButton(QStringLiteral("Print"), print_group);
@@ -144,12 +220,17 @@ PrintPage::PrintPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
 
     connect(browse, &QPushButton::clicked, this, [this]() { browse_file(); });
     connect(refresh_printers_, &QPushButton::clicked, this, [this]() { refresh_printers(); });
+    connect(refresh_capabilities_, &QPushButton::clicked, this,
+        [this]() { refresh_capabilities(true); });
     connect(print_, &QPushButton::clicked, this, [this]() { submit(false); });
     connect(diagnose_, &QPushButton::clicked, this, [this]() { submit(true); });
     connect(refresh_jobs_, &QPushButton::clicked, this, [this]() { refresh_jobs(); });
     connect(cancel_, &QPushButton::clicked, this, [this]() { cancel_selected(); });
-    connect(printer_, &QComboBox::currentTextChanged, this,
-        [this](const QString&) { refresh_jobs(); });
+    connect(preset_, &QComboBox::currentIndexChanged, this, [this](int) { apply_preset(); });
+    connect(printer_, &QComboBox::currentIndexChanged, this, [this](int) {
+        refresh_jobs();
+        refresh_capabilities(false);
+    });
 
     refresh_printers();
 }
@@ -163,6 +244,7 @@ void PrintPage::refresh_printers() {
         [this, watcher, previous]() {
             try {
                 const auto snapshot = watcher->result();
+                const QSignalBlocker blocker{printer_};
                 printer_->clear();
                 int restore = -1;
                 for (const auto& printer : snapshot.printers) {
@@ -184,7 +266,10 @@ void PrintPage::refresh_printers() {
                 const bool available = printer_->count() > 0;
                 print_->setEnabled(available);
                 diagnose_->setEnabled(available);
-                refresh_jobs();
+                refresh_capabilities_->setEnabled(available);
+                if (!available) {
+                    capabilities_status_->setText(QStringLiteral("No printer discovered"));
+                }
             } catch (const std::exception& error) {
                 log_->appendPlainText(
                     QStringLiteral("Printer discovery error: %1")
@@ -192,8 +277,81 @@ void PrintPage::refresh_printers() {
             }
             refresh_printers_->setEnabled(true);
             watcher->deleteLater();
+            refresh_jobs();
+            refresh_capabilities(false);
         });
     watcher->setFuture(QtConcurrent::run([manager = manager_]() { return manager->snapshot(); }));
+}
+
+void PrintPage::refresh_capabilities(const bool force_refresh) {
+    const QString printer = printer_->currentData().toString();
+    if (printer.isEmpty()) {
+        return;
+    }
+
+    refresh_capabilities_->setEnabled(false);
+    capabilities_status_->setText(QStringLiteral("Loading physical IPP capabilities…"));
+    const std::string name = printer.toStdString();
+
+    auto* watcher = new QFutureWatcher<PrinterCapabilities>(this);
+    connect(watcher, &QFutureWatcher<PrinterCapabilities>::finished, this,
+        [this, watcher, printer]() {
+            try {
+                const auto caps = watcher->result();
+                if (printer_->currentData().toString() != printer) {
+                    refresh_capabilities_->setEnabled(true);
+                    watcher->deleteLater();
+                    return;
+                }
+
+                populate_strings(color_, caps.color_modes, QStringLiteral("color"), false);
+                populate_strings(sides_, caps.sides, QStringLiteral("one-sided"), false);
+                populate_strings(media_, caps.media, QStringLiteral("iso_a4_210x297mm"), false);
+                populate_strings(source_, caps.media_sources, QString{}, true);
+                populate_strings(media_type_, caps.media_types, QString{}, true);
+
+                {
+                    const QSignalBlocker blocker{quality_};
+                    quality_->clear();
+                    for (const int quality : caps.qualities) {
+                        quality_->addItem(quality_label(quality), quality);
+                    }
+                    int normal = quality_->findData(4);
+                    if (normal < 0 && quality_->count() > 0) {
+                        normal = 0;
+                    }
+                    if (normal >= 0) {
+                        quality_->setCurrentIndex(normal);
+                    }
+                    quality_->setEnabled(!caps.qualities.empty());
+                }
+
+                copies_->setRange(
+                    std::max(1, caps.copies_min),
+                    std::max(std::max(1, caps.copies_min), caps.copies_max));
+                copies_->setValue(1);
+
+                capabilities_status_->setText(
+                    QStringLiteral("%1 — %2 color mode(s), %3 paper size(s), %4 source(s), copies %5–%6")
+                        .arg(QString::fromStdString(caps.source))
+                        .arg(caps.color_modes.size())
+                        .arg(caps.media.size())
+                        .arg(caps.media_sources.size())
+                        .arg(caps.copies_min)
+                        .arg(caps.copies_max));
+                apply_preset();
+            } catch (const std::exception& error) {
+                capabilities_status_->setText(
+                    QStringLiteral("Capability error: %1").arg(QString::fromUtf8(error.what())));
+                log_->appendPlainText(capabilities_status_->text());
+            }
+            refresh_capabilities_->setEnabled(printer_->count() > 0);
+            watcher->deleteLater();
+        });
+
+    watcher->setFuture(QtConcurrent::run([manager = manager_, name, force_refresh]() {
+        return manager->print_backend().capabilities(name, force_refresh);
+    }));
 }
 
 void PrintPage::browse_file() {
@@ -207,26 +365,49 @@ void PrintPage::browse_file() {
     }
 }
 
+void PrintPage::apply_preset() {
+    const QString key = preset_->currentData().toString();
+    if (key == QStringLiteral("custom")) {
+        return;
+    }
+
+    if (key == QStringLiteral("mono")) {
+        select_if_available(color_, QStringLiteral("monochrome"));
+        select_if_available(sides_, QStringLiteral("one-sided"));
+        select_if_available(quality_, 4);
+    } else if (key == QStringLiteral("economy")) {
+        select_if_available(color_, QStringLiteral("monochrome"));
+        select_if_available(sides_, QStringLiteral("two-sided-long-edge"));
+        select_if_available(quality_, 3);
+    } else if (key == QStringLiteral("high")) {
+        select_if_available(color_, QStringLiteral("color"));
+        select_if_available(sides_, QStringLiteral("one-sided"));
+        select_if_available(quality_, 5);
+    } else {
+        select_if_available(color_, QStringLiteral("color"));
+        select_if_available(sides_, QStringLiteral("one-sided"));
+        select_if_available(quality_, 4);
+    }
+}
+
 PrintProfile PrintPage::selected_profile() const {
     PrintProfile result;
-    const QString key = profile_->currentData().toString();
-    if (key == QStringLiteral("mono")) {
-        result.name = "Document monochrome";
-        result.color_mode = "monochrome";
-    } else if (key == QStringLiteral("economy")) {
-        result.name = "Economy mono duplex";
-        result.color_mode = "monochrome";
-        result.sides = "two-sided-long-edge";
-        result.quality = 3;
-    } else if (key == QStringLiteral("high")) {
-        result.name = "High quality color";
-        result.color_mode = "color";
-        result.quality = 5;
-    } else {
-        result.name = "Standard color";
-        result.color_mode = "color";
-        result.quality = 4;
+    result.name = preset_->currentText().toStdString();
+    if (media_->currentIndex() >= 0) {
+        result.media = media_->currentData().toString().toStdString();
     }
+    result.media_source = source_->currentData().toString().toStdString();
+    result.media_type = media_type_->currentData().toString().toStdString();
+    if (color_->currentIndex() >= 0) {
+        result.color_mode = color_->currentData().toString().toStdString();
+    }
+    if (sides_->currentIndex() >= 0) {
+        result.sides = sides_->currentData().toString().toStdString();
+    }
+    if (quality_->currentIndex() >= 0) {
+        result.quality = quality_->currentData().toInt();
+    }
+    result.copies = copies_->value();
     return result;
 }
 
@@ -247,7 +428,7 @@ void PrintPage::submit(const bool diagnostic) {
     diagnose_->setEnabled(false);
     log_->setPlainText(
         diagnostic ? QStringLiteral("Submitting and tracing print job…")
-                   : QStringLiteral("Submitting print job…"));
+                   : QStringLiteral("Submitting print job with dynamic IPP options…"));
 
     const std::string printer_name = printer.toStdString();
     const std::string file_path = path.toStdString();
@@ -295,7 +476,7 @@ void PrintPage::submit(const bool diagnostic) {
         });
     watcher->setFuture(QtConcurrent::run(
         [manager = manager_, printer_name, file_path, profile]() {
-            return manager->print_backend().print_file(
+            return manager->print_backend().print_file_advanced(
                 printer_name,
                 file_path,
                 "DocSuite GUI print",
