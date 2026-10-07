@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDevice>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -27,6 +28,8 @@
 #include <string>
 
 namespace {
+
+constexpr qsizetype kMaxRpcRequestBytes = 64 * 1024;
 
 [[nodiscard]] QString runtime_directory() {
     QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
@@ -99,11 +102,9 @@ namespace {
         {QStringLiteral("type"), QString::fromStdString(supply.type)},
         {QStringLiteral("low_threshold"), supply.low_threshold},
     };
-    if (supply.percent.has_value()) {
-        result.insert(QStringLiteral("percent"), *supply.percent);
-    } else {
-        result.insert(QStringLiteral("percent"), QJsonValue::Null);
-    }
+    result.insert(
+        QStringLiteral("percent"),
+        supply.percent.has_value() ? QJsonValue{*supply.percent} : QJsonValue::Null);
     return result;
 }
 
@@ -149,6 +150,14 @@ namespace {
     };
 }
 
+[[nodiscard]] QJsonObject preflight_json(const docsuite::PrintPreflightResult& result) {
+    return QJsonObject{
+        {QStringLiteral("ok"), result.ok},
+        {QStringLiteral("errors"), strings(result.errors)},
+        {QStringLiteral("warnings"), strings(result.warnings)},
+    };
+}
+
 [[nodiscard]] QJsonObject scanner_capabilities_json(
     const docsuite::ScannerCapabilities& caps) {
 
@@ -176,6 +185,97 @@ namespace {
     };
 }
 
+[[nodiscard]] std::string optional_keyword(
+    const QJsonObject& params,
+    const QString& key,
+    const std::string& fallback,
+    const bool empty_allowed = false) {
+
+    if (!params.contains(key)) {
+        return fallback;
+    }
+    const QJsonValue raw = params.value(key);
+    if (!raw.isString()) {
+        throw std::runtime_error(
+            "parameter must be a string: " + key.toStdString());
+    }
+    const QString value = raw.toString();
+    if ((!empty_allowed && value.isEmpty()) || value.size() > 256) {
+        throw std::runtime_error(
+            "invalid string parameter: " + key.toStdString());
+    }
+    return value.toStdString();
+}
+
+[[nodiscard]] int optional_integer(
+    const QJsonObject& params,
+    const QString& key,
+    const int fallback,
+    const int minimum,
+    const int maximum) {
+
+    if (!params.contains(key)) {
+        return fallback;
+    }
+    const QJsonValue raw = params.value(key);
+    if (!raw.isDouble()) {
+        throw std::runtime_error(
+            "parameter must be an integer: " + key.toStdString());
+    }
+    const double numeric = raw.toDouble();
+    const int value = raw.toInt(minimum - 1);
+    if (numeric != static_cast<double>(value) || value < minimum || value > maximum) {
+        throw std::runtime_error(
+            "integer parameter is outside accepted bounds: " + key.toStdString());
+    }
+    return value;
+}
+
+[[nodiscard]] docsuite::PrintProfile profile_from_params(const QJsonObject& params) {
+    docsuite::PrintProfile profile;
+    profile.name = optional_keyword(params, QStringLiteral("name"), "RPC profile", true);
+    profile.media = optional_keyword(params, QStringLiteral("media"), profile.media);
+    profile.media_source = optional_keyword(
+        params,
+        QStringLiteral("media_source"),
+        profile.media_source,
+        true);
+    profile.media_type = optional_keyword(
+        params,
+        QStringLiteral("media_type"),
+        profile.media_type,
+        true);
+    profile.color_mode = optional_keyword(
+        params,
+        QStringLiteral("color_mode"),
+        profile.color_mode);
+    profile.sides = optional_keyword(params, QStringLiteral("sides"), profile.sides);
+    profile.quality = optional_integer(
+        params,
+        QStringLiteral("quality"),
+        profile.quality,
+        0,
+        100);
+    profile.copies = optional_integer(
+        params,
+        QStringLiteral("copies"),
+        profile.copies,
+        1,
+        9999);
+    return profile;
+}
+
+[[nodiscard]] QByteArray rpc_error(
+    const QJsonValue& id,
+    const QString& error) {
+    QJsonObject object{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("ok"), false},
+        {QStringLiteral("error"), error},
+    };
+    return QJsonDocument(object).toJson(QJsonDocument::Compact);
+}
+
 class Service final : public QObject {
 public:
     explicit Service(QObject* parent = nullptr)
@@ -194,8 +294,19 @@ public:
             while (QLocalSocket* socket = server_.nextPendingConnection()) {
                 socket->setParent(this);
                 QObject::connect(socket, &QLocalSocket::readyRead, this, [this, socket]() {
-                    buffers_[socket].append(socket->readAll());
                     auto& buffer = buffers_[socket];
+                    buffer.append(socket->readAll());
+                    if (buffer.size() > kMaxRpcRequestBytes) {
+                        socket->write(rpc_error(
+                            QJsonValue::Null,
+                            QStringLiteral("request exceeds 64 KiB limit")));
+                        socket->write("\n");
+                        socket->flush();
+                        buffers_.remove(socket);
+                        socket->disconnectFromServer();
+                        return;
+                    }
+
                     while (true) {
                         const qsizetype newline = buffer.indexOf('\n');
                         if (newline < 0) {
@@ -283,9 +394,7 @@ private:
             }
 
             if (method == QStringLiteral("printer.status")) {
-                const std::string printer = required_string(
-                    params,
-                    QStringLiteral("printer"));
+                const std::string printer = required_string(params, QStringLiteral("printer"));
                 return response(
                     id,
                     true,
@@ -294,9 +403,7 @@ private:
             }
 
             if (method == QStringLiteral("printer.capabilities")) {
-                const std::string printer = required_string(
-                    params,
-                    QStringLiteral("printer"));
+                const std::string printer = required_string(params, QStringLiteral("printer"));
                 const bool refresh = params.value(QStringLiteral("refresh")).toBool(false);
                 return response(
                     id,
@@ -306,16 +413,24 @@ private:
                     {});
             }
 
+            if (method == QStringLiteral("printer.preflight")) {
+                const std::string printer = required_string(params, QStringLiteral("printer"));
+                const docsuite::PrintProfile profile = profile_from_params(params);
+                const bool detailed = params.value(QStringLiteral("detailed")).toBool(false);
+                const bool refresh = params.value(QStringLiteral("refresh")).toBool(false);
+                const auto result = detailed
+                    ? manager_->print_backend().preflight_detailed(printer, profile, refresh)
+                    : manager_->print_backend().preflight(printer, profile, refresh);
+                return response(id, true, preflight_json(result), {});
+            }
+
             if (method == QStringLiteral("printer.jobs")) {
-                const std::string printer = required_string(
-                    params,
-                    QStringLiteral("printer"));
+                const std::string printer = required_string(params, QStringLiteral("printer"));
                 const bool completed = params
                     .value(QStringLiteral("include_completed"))
                     .toBool(true);
                 QJsonArray jobs;
-                for (const auto& job :
-                     manager_->job_manager().list_jobs(printer, completed)) {
+                for (const auto& job : manager_->job_manager().list_jobs(printer, completed)) {
                     jobs.append(job_json(job));
                 }
                 return response(
@@ -326,12 +441,8 @@ private:
             }
 
             if (method == QStringLiteral("printer.cancel_job")) {
-                const std::string printer = required_string(
-                    params,
-                    QStringLiteral("printer"));
-                const int job_id = required_positive_int(
-                    params,
-                    QStringLiteral("job_id"));
+                const std::string printer = required_string(params, QStringLiteral("printer"));
+                const int job_id = required_positive_int(params, QStringLiteral("job_id"));
                 const auto job = manager_->job_manager().job(printer, job_id);
                 if (!job.has_value()) {
                     throw std::runtime_error("print job not found");
@@ -343,12 +454,10 @@ private:
                         "refusing to cancel a print job not owned by the local user");
                 }
                 if (terminal_job(job->state)) {
-                    throw std::runtime_error(
-                        "print job is already in a terminal state");
+                    throw std::runtime_error("print job is already in a terminal state");
                 }
                 if (!manager_->job_manager().cancel(printer, job_id)) {
-                    throw std::runtime_error(
-                        "CUPS refused print job cancellation");
+                    throw std::runtime_error("CUPS refused print job cancellation");
                 }
 
                 return response(
@@ -363,9 +472,7 @@ private:
             }
 
             if (method == QStringLiteral("scanner.capabilities")) {
-                const std::string scanner = required_string(
-                    params,
-                    QStringLiteral("scanner"));
+                const std::string scanner = required_string(params, QStringLiteral("scanner"));
                 return response(
                     id,
                     true,
@@ -375,20 +482,15 @@ private:
             }
 
             if (method == QStringLiteral("scanner.scan")) {
-                const std::string scanner = required_string(
-                    params,
-                    QStringLiteral("scanner"));
+                const std::string scanner = required_string(params, QStringLiteral("scanner"));
 
                 docsuite::ScanSettings settings;
-                if (params.contains(QStringLiteral("dpi"))) {
-                    settings.dpi = required_positive_int(
-                        params,
-                        QStringLiteral("dpi"));
-                }
-                if (settings.dpi < 75 || settings.dpi > 1200) {
-                    throw std::runtime_error(
-                        "scanner.scan dpi must be between 75 and 1200");
-                }
+                settings.dpi = optional_integer(
+                    params,
+                    QStringLiteral("dpi"),
+                    settings.dpi,
+                    75,
+                    1200);
 
                 const QString mode = params
                     .value(QStringLiteral("mode"))
@@ -414,15 +516,12 @@ private:
                 const QString output = QDir(scan_output_directory()).filePath(
                     QStringLiteral("scan-%1.pnm").arg(
                         QUuid::createUuid().toString(QUuid::WithoutBraces)));
-                manager_->scan_backend().save_pnm(
-                    frame,
-                    output.toStdString());
+                manager_->scan_backend().save_pnm(frame, output.toStdString());
                 if (!QFile::setPermissions(
                         output,
                         QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
                     QFile::remove(output);
-                    throw std::runtime_error(
-                        "Unable to secure scanner output file");
+                    throw std::runtime_error("Unable to secure scanner output file");
                 }
 
                 return response(
@@ -437,23 +536,14 @@ private:
                          frame.format == docsuite::ScanPixelFormat::rgb24
                              ? QStringLiteral("RGB24")
                              : QStringLiteral("Gray8")},
-                        {QStringLiteral("bytes"),
-                         static_cast<qint64>(frame.pixels.size())},
+                        {QStringLiteral("bytes"), static_cast<qint64>(frame.pixels.size())},
                     },
                     {});
             }
 
-            return response(
-                id,
-                false,
-                {},
-                QStringLiteral("unknown method"));
+            return response(id, false, {}, QStringLiteral("unknown method"));
         } catch (const std::exception& error) {
-            return response(
-                id,
-                false,
-                {},
-                QString::fromUtf8(error.what()));
+            return response(id, false, {}, QString::fromUtf8(error.what()));
         }
     }
 
@@ -461,10 +551,15 @@ private:
         const QJsonObject& params,
         const QString& key) {
 
-        const QString value = params.value(key).toString();
-        if (value.isEmpty()) {
+        const QJsonValue raw = params.value(key);
+        if (!raw.isString()) {
             throw std::runtime_error(
-                "missing required parameter: " + key.toStdString());
+                "missing required string parameter: " + key.toStdString());
+        }
+        const QString value = raw.toString();
+        if (value.isEmpty() || value.size() > 1024) {
+            throw std::runtime_error(
+                "invalid required string parameter: " + key.toStdString());
         }
         return value.toStdString();
     }
@@ -473,15 +568,16 @@ private:
         const QJsonObject& params,
         const QString& key) {
 
-        const QJsonValue value = params.value(key);
-        if (!value.isDouble()) {
+        const QJsonValue raw = params.value(key);
+        if (!raw.isDouble()) {
             throw std::runtime_error(
                 "missing integer parameter: " + key.toStdString());
         }
-        const int result = value.toInt(0);
-        if (result <= 0) {
+        const double numeric = raw.toDouble();
+        const int result = raw.toInt(0);
+        if (numeric != static_cast<double>(result) || result <= 0) {
             throw std::runtime_error(
-                "parameter must be positive: " + key.toStdString());
+                "parameter must be a positive integer: " + key.toStdString());
         }
         return result;
     }
