@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CTest)
+include(GNUInstallDirs)
 
 option(DOCSUITE_BUILD_DESKTOP "Build the Qt desktop application" ON)
 option(DOCSUITE_BUILD_TESTS "Build tests" ON)
@@ -69,6 +70,7 @@ target_link_libraries(docsuite-device-cli PRIVATE DocSuite::DeviceCore)
 set_target_properties(docsuite-device-cli PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/cli
 )
+install(TARGETS docsuite-device-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(DOCSUITE_BUILD_DESKTOP)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent)
@@ -97,6 +99,11 @@ if(DOCSUITE_BUILD_DESKTOP)
     set_target_properties(docsuite-device-center PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/apps/desktop
     )
+    install(TARGETS docsuite-device-center RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(
+        FILES packaging/linux/docsuite-device-center.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+    )
 endif()
 
 if(BUILD_TESTING AND DOCSUITE_BUILD_TESTS)
@@ -104,3 +111,15 @@ if(BUILD_TESTING AND DOCSUITE_BUILD_TESTS)
     target_link_libraries(docsuite-core-tests PRIVATE DocSuite::DeviceCore)
     add_test(NAME docsuite-core-tests COMMAND docsuite-core-tests)
 endif()
+
+set(CPACK_PACKAGE_NAME "docsuite-device-core")
+set(CPACK_PACKAGE_VENDOR "DocSuite Project")
+set(CPACK_PACKAGE_CONTACT "Gladius33")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Native Linux printing, scanning, OCR and device diagnostics")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_GENERATOR "DEB")
+set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "DocSuite Project")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "tesseract-ocr-fra, tesseract-ocr-eng")
+include(CPack)
