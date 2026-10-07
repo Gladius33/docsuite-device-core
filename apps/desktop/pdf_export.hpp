@@ -17,6 +17,13 @@ struct PdfScanPage {
     QImage image;
     int dpi{300};
     std::optional<OcrResult> ocr;
+
+    // One-level edit history. QImage is implicitly shared, so taking this
+    // snapshot is cheap until the active page is replaced by the transform.
+    QImage undo_image;
+    int undo_dpi{300};
+    std::optional<OcrResult> undo_ocr;
+    bool has_undo{false};
 };
 
 [[nodiscard]] bool export_scan_pdf(
