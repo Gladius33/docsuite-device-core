@@ -31,6 +31,7 @@ add_library(docsuite_device_core
     src/print/cups_print_backend.cpp
     src/print/cups_print_advanced.cpp
     src/print/job_manager.cpp
+    src/print/system_queue_manager.cpp
     src/scan/escl_scan_backend.cpp
     src/scan/sane_capabilities.cpp
     src/scan/sane_scan_backend.cpp
@@ -107,6 +108,8 @@ if(DOCSUITE_BUILD_DESKTOP)
         apps/desktop/copy_page.hpp
         apps/desktop/print_page.cpp
         apps/desktop/print_page.hpp
+        apps/desktop/system_page.cpp
+        apps/desktop/system_page.hpp
         apps/desktop/pdf_export.cpp
         apps/desktop/pdf_export.hpp
     )
