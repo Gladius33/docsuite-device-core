@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 cmake_minimum_required(VERSION 3.25)
-project(docsuite_device_core VERSION 0.4.0 LANGUAGES CXX)
+project(docsuite_device_core VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,7 @@ option(DOCSUITE_BUILD_DESKTOP "Build the Qt desktop application" ON)
 option(DOCSUITE_BUILD_SERVICE "Build the persistent local device service" ON)
 option(DOCSUITE_BUILD_TESTS "Build tests" ON)
 option(DOCSUITE_ENABLE_OCR "Enable Tesseract OCR when available" ON)
+option(DOCSUITE_ENABLE_OPENCV "Enable OpenCV document processing when available" ON)
 
 find_path(CUPS_INCLUDE_DIR cups/cups.h REQUIRED)
 find_library(CUPS_LIBRARY NAMES cups REQUIRED)
@@ -25,6 +26,7 @@ find_library(SANE_LIBRARY NAMES sane REQUIRED)
 
 add_library(docsuite_device_core
     src/device/device_manager.cpp
+    src/image/image_processor.cpp
     src/ocr/tesseract_ocr.cpp
     src/print/cups_print_backend.cpp
     src/print/cups_print_advanced.cpp
@@ -53,6 +55,18 @@ if(DOCSUITE_ENABLE_OCR)
         message(STATUS "DocSuite OCR: Tesseract enabled")
     else()
         message(STATUS "DocSuite OCR: Tesseract not found, OCR disabled")
+    endif()
+endif()
+
+if(DOCSUITE_ENABLE_OPENCV)
+    find_package(OpenCV QUIET COMPONENTS core imgproc)
+    if(OpenCV_FOUND)
+        target_include_directories(docsuite_device_core PRIVATE ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(docsuite_device_core PRIVATE ${OpenCV_LIBS})
+        target_compile_definitions(docsuite_device_core PRIVATE DOCSUITE_HAVE_OPENCV=1)
+        message(STATUS "DocSuite ImageCore: OpenCV enabled")
+    else()
+        message(STATUS "DocSuite ImageCore: OpenCV not found, portable processing fallback enabled")
     endif()
 endif()
 
