@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "docsuite/core/types.hpp"
+#include "docsuite/print/job_manager.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -21,6 +22,7 @@ int main() {
 
     docsuite::PrinterCapabilities caps{};
     caps.printer = "test-printer";
+    caps.source = "ipp-direct";
     caps.color_modes = {"color", "monochrome"};
     caps.sides = {"one-sided", "two-sided-long-edge"};
     caps.qualities = {3, 4, 5};
@@ -47,6 +49,25 @@ int main() {
     };
     assert(low_black.percent.has_value());
     assert(*low_black.percent <= low_black.low_threshold);
+
+    docsuite::PrintJobInfo job{};
+    job.id = 42;
+    job.printer = "test-printer";
+    job.state = docsuite::PrintJobState::processing;
+    assert(job.id == 42);
+    assert(std::string{docsuite::print_job_state_name(job.state)} == "processing");
+
+    docsuite::PrintJobTrace trace{};
+    trace.job_id = 42;
+    trace.submit_to_accept = std::chrono::milliseconds{12};
+    trace.events.push_back(docsuite::JobTimelineEvent{
+        .name = "cups-accepted",
+        .state = docsuite::PrintJobState::pending,
+        .at = {},
+        .since_submit = std::chrono::milliseconds{12},
+    });
+    assert(trace.events.size() == 1U);
+    assert(trace.submit_to_accept.count() == 12);
 
     std::cout << "DocSuite core smoke tests passed\n";
     return 0;
