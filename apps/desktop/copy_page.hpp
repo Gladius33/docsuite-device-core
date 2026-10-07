@@ -22,6 +22,8 @@ public:
     void refresh_devices();
 
 private:
+    void refresh_scanner_capabilities();
+    void refresh_printer_capabilities();
     void start_copy();
 
     std::shared_ptr<DeviceManager> manager_;
@@ -29,8 +31,13 @@ private:
     QComboBox* printer_{nullptr};
     QComboBox* scan_mode_{nullptr};
     QComboBox* dpi_{nullptr};
+    QComboBox* scan_source_{nullptr};
     QComboBox* print_mode_{nullptr};
     QComboBox* duplex_{nullptr};
+    QComboBox* quality_{nullptr};
+    QComboBox* media_{nullptr};
+    QComboBox* print_source_{nullptr};
+    QComboBox* media_type_{nullptr};
     QSpinBox* copies_{nullptr};
     QPushButton* refresh_{nullptr};
     QPushButton* copy_{nullptr};
