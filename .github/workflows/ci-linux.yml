@@ -66,7 +66,7 @@ jobs:
           data = Path('build/escl-mock.pnm').read_bytes()
           assert data.startswith(b'P6\n4 3\n255\n'), data[:64]
           assert len(data) >= len(b'P6\n4 3\n255\n') + 4 * 3 * 3
-          print('Direct eSCL mock scan: OK')
+          print('Direct eSCL mock scan with warmup retry: OK')
           PY
           kill "$SERVER_PID"
           trap - EXIT
@@ -76,37 +76,74 @@ jobs:
           export XDG_RUNTIME_DIR="$PWD/build/runtime"
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
+
+          python3 tests/escl_mock_server.py 18081 &
+          SCANNER_PID=$!
           ./build/services/device-service/docsuite-device-service &
           SERVICE_PID=$!
-          trap 'kill "$SERVICE_PID" 2>/dev/null || true' EXIT
+          trap 'kill "$SERVICE_PID" "$SCANNER_PID" 2>/dev/null || true' EXIT
+
           python3 - <<'PY'
           import json
           import os
+          from pathlib import Path
           import socket
+          import stat
           import time
 
-          path = os.path.join(os.environ['XDG_RUNTIME_DIR'], 'docsuite-device-core.sock')
+          socket_path = os.path.join(
+              os.environ['XDG_RUNTIME_DIR'],
+              'docsuite-device-core.sock',
+          )
           deadline = time.time() + 5
-          while not os.path.exists(path) and time.time() < deadline:
+          while not os.path.exists(socket_path) and time.time() < deadline:
               time.sleep(0.05)
-          assert os.path.exists(path), path
+          assert os.path.exists(socket_path), socket_path
 
-          with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-              client.connect(path)
-              client.sendall(b'{"id":1,"method":"ping","params":{}}\n')
-              data = b''
-              while b'\n' not in data:
-                  chunk = client.recv(4096)
-                  assert chunk
-                  data += chunk
-          response = json.loads(data.split(b'\n', 1)[0])
-          assert response['id'] == 1
-          assert response['ok'] is True
-          assert response['result']['service'] == 'docsuite-device-service'
-          assert response['result']['version'] == '0.5.0'
-          print('DocSuite Unix socket service: OK')
+          def rpc(request):
+              with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                  client.connect(socket_path)
+                  client.sendall(json.dumps(request).encode() + b'\n')
+                  data = b''
+                  while b'\n' not in data:
+                      chunk = client.recv(4096)
+                      assert chunk
+                      data += chunk
+              return json.loads(data.split(b'\n', 1)[0])
+
+          ping = rpc({'id': 1, 'method': 'ping', 'params': {}})
+          assert ping['id'] == 1
+          assert ping['ok'] is True
+          assert ping['result']['service'] == 'docsuite-device-service'
+          assert ping['result']['version'] == '0.5.0'
+
+          scan = rpc({
+              'id': 2,
+              'method': 'scanner.scan',
+              'params': {
+                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'dpi': 300,
+                  'mode': 'Color',
+                  'source': 'Flatbed',
+              },
+          })
+          assert scan['id'] == 2, scan
+          assert scan['ok'] is True, scan
+          result = scan['result']
+          assert result['width'] == 4, result
+          assert result['height'] == 3, result
+          assert result['dpi'] == 300, result
+          assert result['format'] == 'RGB24', result
+          output = Path(result['path'])
+          assert output.is_file(), output
+          expected_root = Path(os.environ['XDG_RUNTIME_DIR']) / 'docsuite-device-core' / 'scans'
+          assert output.parent == expected_root, (output, expected_root)
+          assert stat.S_IMODE(output.stat().st_mode) == 0o600, oct(output.stat().st_mode)
+          assert output.read_bytes().startswith(b'P6\n4 3\n255\n')
+          print('DocSuite Unix socket scanner.scan: OK')
           PY
-          kill "$SERVICE_PID"
+
+          kill "$SERVICE_PID" "$SCANNER_PID"
           trap - EXIT
 
       - name: Build Debian package
