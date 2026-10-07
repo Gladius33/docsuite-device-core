@@ -30,6 +30,7 @@ add_library(docsuite_device_core
     src/ocr/tesseract_ocr.cpp
     src/print/cups_print_backend.cpp
     src/print/cups_print_advanced.cpp
+    src/print/print_validation.cpp
     src/print/job_manager.cpp
     src/print/system_queue_manager.cpp
     src/scan/escl_scan_backend.cpp
