@@ -204,6 +204,9 @@ jobs:
           print('DocSuite Unix socket scanner.scan safety boundaries: OK')
           PY
 
+          QT_QPA_PLATFORM=offscreen \
+            ./build/apps/desktop/docsuite-device-center --smoke-test
+
           kill "$SERVICE_PID" "$SCANNER_PID"
           trap - EXIT
 
@@ -218,6 +221,47 @@ jobs:
           name: docsuite-device-core-deb
           path: build/*.deb
           if-no-files-found: error
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libcups2-dev \
+            libsane-dev \
+            libtesseract-dev \
+            tesseract-ocr-eng \
+            tesseract-ocr-fra \
+            libopencv-dev
+
+      - name: Configure ASan + UBSan
+        run: >-
+          cmake -S . -B build-sanitize -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DDOCSUITE_BUILD_DESKTOP=OFF
+          -DDOCSUITE_BUILD_SERVICE=OFF
+          -DDOCSUITE_BUILD_TESTS=ON
+          -DDOCSUITE_ENABLE_OCR=ON
+          -DDOCSUITE_ENABLE_OPENCV=ON
+          -DDOCSUITE_ENABLE_SANITIZERS=ON
+
+      - name: Build ASan + UBSan
+        run: cmake --build build-sanitize --parallel 2
+
+      - name: Test ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure
 
   mcp:
     runs-on: ubuntu-24.04
