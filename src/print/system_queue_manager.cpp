@@ -12,6 +12,7 @@
 #include <cctype>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace docsuite {
 namespace {
@@ -32,6 +33,19 @@ void validate_queue_name(const std::string& name) {
     }
 }
 
+void validate_instance_name(const std::string& name) {
+    if (name.empty() || name.size() > 63U) {
+        throw std::runtime_error(
+            "CUPS profile instance must contain between 1 and 63 characters");
+    }
+    if (!std::all_of(name.begin(), name.end(), [](const unsigned char ch) {
+            return std::isalnum(ch) != 0 || ch == '-' || ch == '_' || ch == '.';
+        })) {
+        throw std::runtime_error(
+            "CUPS profile instance may only contain letters, digits, '.', '_' and '-'");
+    }
+}
+
 [[nodiscard]] std::string option_value(
     const cups_dest_t& destination,
     const char* name) {
@@ -42,6 +56,49 @@ void validate_queue_name(const std::string& name) {
         return value;
     }
     return {};
+}
+
+void replace_option(
+    cups_dest_t& destination,
+    const char* name,
+    const std::string& value) {
+
+    destination.num_options = cupsRemoveOption(
+        name,
+        destination.num_options,
+        &destination.options);
+    if (!value.empty()) {
+        destination.num_options = cupsAddOption(
+            name,
+            value.c_str(),
+            destination.num_options,
+            &destination.options);
+    }
+}
+
+[[nodiscard]] cups_dest_t* require_base_destination(
+    const std::string& queue,
+    const int count,
+    cups_dest_t* destinations) {
+
+    cups_dest_t* destination = cupsGetDest(
+        queue.c_str(),
+        nullptr,
+        count,
+        destinations);
+    if (destination == nullptr) {
+        throw std::runtime_error(
+            "CUPS destination not found for user profile: " + queue);
+    }
+    return destination;
+}
+
+void save_destinations(const int count, cups_dest_t* destinations) {
+    if (cupsSetDests2(CUPS_HTTP_DEFAULT, count, destinations) != 0) {
+        throw std::runtime_error(
+            std::string{"Unable to save CUPS user destinations: "} +
+            cupsLastErrorString());
+    }
 }
 
 } // namespace
@@ -170,6 +227,141 @@ SystemQueueInfo SystemQueueManager::ensure_temporary_driverless(
     }
 
     return result;
+}
+
+UserPrintProfileInfo SystemQueueManager::save_user_profile(
+    const std::string& queue,
+    const std::string& instance,
+    const PrintProfile& profile) const {
+
+    validate_queue_name(queue);
+    validate_instance_name(instance);
+
+    cups_dest_t* destinations = nullptr;
+    int count = cupsGetDests2(CUPS_HTTP_DEFAULT, &destinations);
+    if (count < 0) {
+        throw std::runtime_error(
+            std::string{"Unable to read CUPS destinations: "} + cupsLastErrorString());
+    }
+
+    try {
+        (void)require_base_destination(queue, count, destinations);
+        count = cupsAddDest(
+            queue.c_str(),
+            instance.c_str(),
+            count,
+            &destinations);
+
+        cups_dest_t* destination = cupsGetDest(
+            queue.c_str(),
+            instance.c_str(),
+            count,
+            destinations);
+        if (destination == nullptr) {
+            throw std::runtime_error(
+                "Unable to create CUPS user profile instance " +
+                queue + "/" + instance);
+        }
+
+        replace_option(*destination, "media", profile.media);
+        replace_option(*destination, "print-color-mode", profile.color_mode);
+        replace_option(*destination, "sides", profile.sides);
+        replace_option(
+            *destination,
+            "print-quality",
+            profile.quality > 0 ? std::to_string(profile.quality) : std::string{});
+        replace_option(*destination, "media-source", profile.media_source);
+        replace_option(*destination, "media-type", profile.media_type);
+        replace_option(
+            *destination,
+            "copies",
+            profile.copies > 0 ? std::to_string(profile.copies) : std::string{});
+
+        save_destinations(count, destinations);
+        cupsFreeDests(count, destinations);
+    } catch (...) {
+        cupsFreeDests(count, destinations);
+        throw;
+    }
+
+    return UserPrintProfileInfo{
+        .queue = queue,
+        .instance = instance,
+        .display_name = profile.name.empty()
+            ? queue + "/" + instance
+            : profile.name,
+    };
+}
+
+std::vector<UserPrintProfileInfo> SystemQueueManager::list_user_profiles(
+    const std::string& queue) const {
+
+    validate_queue_name(queue);
+    cups_dest_t* destinations = nullptr;
+    const int count = cupsGetDests2(CUPS_HTTP_DEFAULT, &destinations);
+    if (count < 0) {
+        throw std::runtime_error(
+            std::string{"Unable to read CUPS destinations: "} + cupsLastErrorString());
+    }
+
+    std::vector<UserPrintProfileInfo> result;
+    for (int i = 0; i < count; ++i) {
+        const cups_dest_t& destination = destinations[i];
+        if (destination.name == nullptr ||
+            queue != destination.name ||
+            destination.instance == nullptr ||
+            *destination.instance == '\0') {
+            continue;
+        }
+        result.push_back(UserPrintProfileInfo{
+            .queue = queue,
+            .instance = destination.instance,
+            .display_name = queue + "/" + destination.instance,
+        });
+    }
+
+    cupsFreeDests(count, destinations);
+    std::sort(
+        result.begin(),
+        result.end(),
+        [](const UserPrintProfileInfo& left, const UserPrintProfileInfo& right) {
+            return left.instance < right.instance;
+        });
+    return result;
+}
+
+bool SystemQueueManager::remove_user_profile(
+    const std::string& queue,
+    const std::string& instance) const {
+
+    validate_queue_name(queue);
+    validate_instance_name(instance);
+
+    cups_dest_t* destinations = nullptr;
+    int count = cupsGetDests2(CUPS_HTTP_DEFAULT, &destinations);
+    if (count < 0) {
+        throw std::runtime_error(
+            std::string{"Unable to read CUPS destinations: "} + cupsLastErrorString());
+    }
+
+    if (cupsGetDest(queue.c_str(), instance.c_str(), count, destinations) == nullptr) {
+        cupsFreeDests(count, destinations);
+        return false;
+    }
+
+    try {
+        count = cupsRemoveDest(
+            queue.c_str(),
+            instance.c_str(),
+            count,
+            &destinations);
+        save_destinations(count, destinations);
+        cupsFreeDests(count, destinations);
+    } catch (...) {
+        cupsFreeDests(count, destinations);
+        throw;
+    }
+    return true;
 }
 
 } // namespace docsuite
