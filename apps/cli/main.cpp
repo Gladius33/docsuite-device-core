@@ -3,9 +3,12 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "docsuite/device/device_manager.hpp"
+#include "docsuite/print/direct_ipp_probe.hpp"
 
+#include <chrono>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +19,7 @@ void print_usage() {
         << "docsuite-device-cli list\n"
         << "docsuite-device-cli capabilities <printer> [--refresh]\n"
         << "docsuite-device-cli status <printer>\n"
+        << "docsuite-device-cli probe-ipp <ipp-uri>\n"
         << "docsuite-device-cli jobs <printer> [active]\n"
         << "docsuite-device-cli cancel <printer> <job-id>\n"
         << "docsuite-device-cli preflight <printer> [color|mono]\n"
@@ -59,7 +63,65 @@ void print_ints(const char* label, const std::vector<int>& values) {
     std::cout << '\n';
 }
 
-[[nodiscard]] docsuite::PrintProfile profile_from_arg(const int argc, char** argv, const int index) {
+void print_capabilities(const docsuite::PrinterCapabilities& caps) {
+    std::cout << "Printer: " << caps.printer << '\n'
+              << "Source: " << caps.source << '\n';
+    print_strings("Color modes", caps.color_modes);
+    print_strings("Sides", caps.sides);
+    print_ints("Quality", caps.qualities);
+    print_ints("Resolution DPI", caps.resolutions_dpi);
+    print_strings("Media sources", caps.media_sources);
+    print_strings("Media types", caps.media_types);
+    print_strings("Document formats", caps.document_formats);
+    std::cout << "Copies: " << caps.copies_min << '-' << caps.copies_max << '\n';
+    std::cout << "Media (" << caps.media.size() << "):\n";
+    for (const auto& medium : caps.media) {
+        std::cout << "  - " << medium << '\n';
+    }
+}
+
+void print_status(const docsuite::PrinterStatus& status) {
+    std::cout << "Printer: " << status.printer << '\n'
+              << "Source: " << status.source << '\n'
+              << "State: " << state_name(status.state) << '\n'
+              << "Accepting jobs: " << (status.accepting_jobs ? "yes" : "no") << '\n';
+
+    std::cout << "Reasons:";
+    if (status.reasons.empty()) {
+        std::cout << " none";
+    } else {
+        for (const auto& reason : status.reasons) {
+            std::cout << ' ' << reason;
+        }
+    }
+    std::cout << '\n';
+
+    std::cout << "Supplies:\n";
+    if (status.supplies.empty()) {
+        std::cout << "  (not reported)\n";
+    }
+    for (const auto& supply : status.supplies) {
+        std::cout << "  - " << supply.name;
+        if (!supply.type.empty()) {
+            std::cout << " | " << supply.type;
+        }
+        if (supply.percent.has_value()) {
+            std::cout << " | " << *supply.percent << '%';
+            if (*supply.percent <= supply.low_threshold) {
+                std::cout << " [low]";
+            }
+        } else {
+            std::cout << " | level unavailable";
+        }
+        std::cout << '\n';
+    }
+}
+
+[[nodiscard]] docsuite::PrintProfile profile_from_arg(
+    const int argc,
+    char** argv,
+    const int index) {
+
     docsuite::PrintProfile profile;
     if (argc > index && std::string{argv[index]} == "mono") {
         profile.name = "Monochrome";
@@ -122,49 +184,22 @@ int main(int argc, char** argv) {
         if (command == "capabilities") {
             if (argc < 3) { print_usage(); return 2; }
             const bool refresh = argc >= 4 && std::string{argv[3]} == "--refresh";
-            const auto caps = manager.print_backend().capabilities(argv[2], refresh);
-
-            std::cout << "Printer: " << caps.printer << '\n'
-                      << "Source: " << caps.source << '\n';
-            print_strings("Color modes", caps.color_modes);
-            print_strings("Sides", caps.sides);
-            print_ints("Quality", caps.qualities);
-            print_ints("Resolution DPI", caps.resolutions_dpi);
-            print_strings("Media sources", caps.media_sources);
-            print_strings("Media types", caps.media_types);
-            print_strings("Document formats", caps.document_formats);
-            std::cout << "Copies: " << caps.copies_min << '-' << caps.copies_max << '\n';
-            std::cout << "Media (" << caps.media.size() << "):\n";
-            for (const auto& medium : caps.media) std::cout << "  - " << medium << '\n';
+            print_capabilities(manager.print_backend().capabilities(argv[2], refresh));
             return 0;
         }
 
         if (command == "status") {
             if (argc < 3) { print_usage(); return 2; }
-            const auto status = manager.print_backend().status(argv[2]);
-            std::cout << "Printer: " << status.printer << '\n'
-                      << "Source: " << status.source << '\n'
-                      << "State: " << state_name(status.state) << '\n'
-                      << "Accepting jobs: " << (status.accepting_jobs ? "yes" : "no") << '\n';
+            print_status(manager.print_backend().status(argv[2]));
+            return 0;
+        }
 
-            std::cout << "Reasons:";
-            if (status.reasons.empty()) std::cout << " none";
-            else for (const auto& reason : status.reasons) std::cout << ' ' << reason;
+        if (command == "probe-ipp") {
+            if (argc < 3) { print_usage(); return 2; }
+            docsuite::DirectIppProbe probe;
+            print_capabilities(probe.capabilities(argv[2]));
             std::cout << '\n';
-
-            std::cout << "Supplies:\n";
-            if (status.supplies.empty()) std::cout << "  (not reported)\n";
-            for (const auto& supply : status.supplies) {
-                std::cout << "  - " << supply.name;
-                if (!supply.type.empty()) std::cout << " | " << supply.type;
-                if (supply.percent.has_value()) {
-                    std::cout << " | " << *supply.percent << '%';
-                    if (*supply.percent <= supply.low_threshold) std::cout << " [low]";
-                } else {
-                    std::cout << " | level unavailable";
-                }
-                std::cout << '\n';
-            }
+            print_status(probe.status(argv[2]));
             return 0;
         }
 

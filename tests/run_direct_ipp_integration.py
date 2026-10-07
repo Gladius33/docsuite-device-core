@@ -33,6 +33,21 @@ def wait_for_server(port: int, process: subprocess.Popen[bytes]) -> None:
     raise RuntimeError("IPP mock did not become ready within 5 seconds")
 
 
+def run_probe(executable: Path, uri: str) -> int:
+    result = subprocess.run(
+        [str(executable), uri],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(
@@ -55,19 +70,18 @@ def main() -> int:
 
     try:
         wait_for_server(port, server)
-        uri = f"ipp://127.0.0.1:{port}/ipp/print"
-        result = subprocess.run(
-            [str(executable), uri],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        return result.returncode
+
+        # First cover the normal IPP Everywhere resource.
+        if run_probe(executable, f"ipp://127.0.0.1:{port}/ipp/print") != 0:
+            return 1
+
+        # Then lock in the libcups URI-warning behavior that previously caused
+        # DocSuite to reject a valid host-only URI as if it were malformed.
+        if run_probe(executable, f"ipp://127.0.0.1:{port}") != 0:
+            return 1
+
+        print("Direct IPP resource + host-only URI integration: OK")
+        return 0
     finally:
         server.terminate()
         try:

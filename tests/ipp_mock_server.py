@@ -57,13 +57,10 @@ def ipp_response(request: bytes) -> bytes:
     request_id = request[4:8]
     result = bytearray(version + b"\x00\x00" + request_id)
 
-    # Operation attributes required in a normal IPP response.
     result.append(0x01)
     result.extend(encode_value(0x47, "attributes-charset", b"utf-8"))
     result.extend(encode_value(0x48, "attributes-natural-language", b"en"))
 
-    # Printer attributes. The values deliberately mirror the important
-    # normalized capabilities of the Canon TS5300-series reference device.
     result.append(0x04)
     result.extend(keyword_values(
         "print-color-mode-supported",
@@ -154,14 +151,14 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     def do_POST(self) -> None:
-        if self.path != "/ipp/print":
+        if self.path not in ("/ipp/print", "/"):
             self.send_error(404)
             return
 
         try:
             request = self._read_body()
             response = ipp_response(request)
-        except Exception as error:  # test server: turn malformed input into HTTP 400
+        except Exception as error:
             payload = str(error).encode("utf-8", errors="replace")
             self.send_response(400)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
