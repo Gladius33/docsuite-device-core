@@ -12,15 +12,18 @@
 #include <QImage>
 #include <QLabel>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
+#include <algorithm>
 #include <exception>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace docsuite::desktop {
 namespace {
@@ -47,6 +50,46 @@ struct CopyResult {
     int height{0};
 };
 
+[[nodiscard]] QString pretty_keyword(const std::string& value) {
+    QString text = QString::fromStdString(value);
+    text.replace(QLatin1Char('-'), QLatin1Char(' '));
+    text.replace(QLatin1Char('_'), QLatin1Char(' '));
+    return text;
+}
+
+void populate_strings(
+    QComboBox* combo,
+    const std::vector<std::string>& values,
+    const QString& preferred = {},
+    const bool allow_auto = false) {
+
+    const QSignalBlocker blocker{combo};
+    combo->clear();
+    if (allow_auto) {
+        combo->addItem(QStringLiteral("Automatic"), QString{});
+    }
+    for (const auto& value : values) {
+        combo->addItem(pretty_keyword(value), QString::fromStdString(value));
+    }
+    int index = preferred.isEmpty() ? -1 : combo->findData(preferred);
+    if (index < 0 && combo->count() > 0) {
+        index = 0;
+    }
+    if (index >= 0) {
+        combo->setCurrentIndex(index);
+    }
+    combo->setEnabled(!values.empty() || allow_auto);
+}
+
+[[nodiscard]] QString quality_label(const int quality) {
+    switch (quality) {
+        case 3: return QStringLiteral("Draft");
+        case 4: return QStringLiteral("Normal");
+        case 5: return QStringLiteral("High");
+        default: return QStringLiteral("Quality %1").arg(quality);
+    }
+}
+
 } // namespace
 
 CopyPage::CopyPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
@@ -59,30 +102,29 @@ CopyPage::CopyPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
     scanner_ = new QComboBox(group);
     printer_ = new QComboBox(group);
     scan_mode_ = new QComboBox(group);
-    scan_mode_->addItem(QStringLiteral("Color"), QStringLiteral("Color"));
-    scan_mode_->addItem(QStringLiteral("Grayscale"), QStringLiteral("Gray"));
     dpi_ = new QComboBox(group);
-    for (const int dpi : {150, 300, 600}) {
-        dpi_->addItem(QStringLiteral("%1 dpi").arg(dpi), dpi);
-    }
-    dpi_->setCurrentIndex(1);
+    scan_source_ = new QComboBox(group);
     print_mode_ = new QComboBox(group);
-    print_mode_->addItem(QStringLiteral("Color"), QStringLiteral("color"));
-    print_mode_->addItem(QStringLiteral("Monochrome"), QStringLiteral("monochrome"));
     duplex_ = new QComboBox(group);
-    duplex_->addItem(QStringLiteral("Single-sided"), QStringLiteral("one-sided"));
-    duplex_->addItem(QStringLiteral("Duplex long edge"), QStringLiteral("two-sided-long-edge"));
-    duplex_->addItem(QStringLiteral("Duplex short edge"), QStringLiteral("two-sided-short-edge"));
+    quality_ = new QComboBox(group);
+    media_ = new QComboBox(group);
+    print_source_ = new QComboBox(group);
+    media_type_ = new QComboBox(group);
     copies_ = new QSpinBox(group);
-    copies_->setRange(1, 99);
+    copies_->setRange(1, 1);
     copies_->setValue(1);
 
     form->addRow(QStringLiteral("Scanner"), scanner_);
     form->addRow(QStringLiteral("Printer"), printer_);
     form->addRow(QStringLiteral("Scan mode"), scan_mode_);
-    form->addRow(QStringLiteral("Resolution"), dpi_);
+    form->addRow(QStringLiteral("Scan resolution"), dpi_);
+    form->addRow(QStringLiteral("Scan source"), scan_source_);
     form->addRow(QStringLiteral("Print mode"), print_mode_);
     form->addRow(QStringLiteral("Duplex"), duplex_);
+    form->addRow(QStringLiteral("Print quality"), quality_);
+    form->addRow(QStringLiteral("Paper"), media_);
+    form->addRow(QStringLiteral("Paper source"), print_source_);
+    form->addRow(QStringLiteral("Media type"), media_type_);
     form->addRow(QStringLiteral("Copies"), copies_);
 
     auto* actions = new QHBoxLayout();
@@ -101,6 +143,10 @@ CopyPage::CopyPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
 
     connect(refresh_, &QPushButton::clicked, this, [this]() { refresh_devices(); });
     connect(copy_, &QPushButton::clicked, this, [this]() { start_copy(); });
+    connect(scanner_, &QComboBox::currentIndexChanged, this,
+        [this](int) { refresh_scanner_capabilities(); });
+    connect(printer_, &QComboBox::currentIndexChanged, this,
+        [this](int) { refresh_printer_capabilities(); });
     connect(scan_mode_, &QComboBox::currentIndexChanged, this, [this](int) {
         const bool gray = scan_mode_->currentData().toString().contains(
             QStringLiteral("gray"), Qt::CaseInsensitive);
@@ -127,6 +173,8 @@ void CopyPage::refresh_devices() {
         [this, watcher, old_scanner, old_printer]() {
             try {
                 const auto snapshot = watcher->result();
+                const QSignalBlocker scanner_blocker{scanner_};
+                const QSignalBlocker printer_blocker{printer_};
                 scanner_->clear();
                 printer_->clear();
 
@@ -143,6 +191,9 @@ void CopyPage::refresh_devices() {
                     if (!printer.model.empty()) {
                         label += QStringLiteral(" — ") + QString::fromStdString(printer.model);
                     }
+                    if (printer.is_default) {
+                        label += QStringLiteral(" [default]");
+                    }
                     printer_->addItem(label, QString::fromStdString(printer.name));
                 }
 
@@ -155,7 +206,7 @@ void CopyPage::refresh_devices() {
                 copy_->setEnabled(ready);
                 status_->setText(
                     ready
-                        ? QStringLiteral("Ready — the source is scanned once and submitted as one CUPS job with the requested copy count.")
+                        ? QStringLiteral("Devices ready — loading SANE and IPP capabilities…")
                         : QStringLiteral("A scanner and a printer are required."));
             } catch (const std::exception& error) {
                 status_->setText(
@@ -164,8 +215,112 @@ void CopyPage::refresh_devices() {
             }
             refresh_->setEnabled(true);
             watcher->deleteLater();
+            refresh_scanner_capabilities();
+            refresh_printer_capabilities();
         });
     watcher->setFuture(QtConcurrent::run([manager = manager_]() { return manager->snapshot(); }));
+}
+
+void CopyPage::refresh_scanner_capabilities() {
+    const QString scanner = scanner_->currentData().toString();
+    if (scanner.isEmpty()) {
+        return;
+    }
+    const std::string name = scanner.toStdString();
+    auto* watcher = new QFutureWatcher<ScannerCapabilities>(this);
+    connect(watcher, &QFutureWatcher<ScannerCapabilities>::finished, this,
+        [this, watcher, scanner]() {
+            try {
+                if (scanner_->currentData().toString() != scanner) {
+                    watcher->deleteLater();
+                    return;
+                }
+                const auto caps = watcher->result();
+                populate_strings(scan_mode_, caps.modes, QStringLiteral("Color"));
+                populate_strings(scan_source_, caps.sources, QStringLiteral("Flatbed"));
+                {
+                    const QSignalBlocker blocker{dpi_};
+                    dpi_->clear();
+                    for (const int dpi : caps.resolutions_dpi) {
+                        dpi_->addItem(QStringLiteral("%1 dpi").arg(dpi), dpi);
+                    }
+                    int preferred = dpi_->findData(300);
+                    if (preferred < 0 && dpi_->count() > 0) {
+                        preferred = 0;
+                    }
+                    if (preferred >= 0) {
+                        dpi_->setCurrentIndex(preferred);
+                    }
+                    dpi_->setEnabled(!caps.resolutions_dpi.empty());
+                }
+                status_->setText(QStringLiteral("Scanner capabilities loaded"));
+            } catch (const std::exception& error) {
+                status_->setText(
+                    QStringLiteral("Scanner capability error: %1")
+                        .arg(QString::fromUtf8(error.what())));
+            }
+            watcher->deleteLater();
+        });
+    watcher->setFuture(QtConcurrent::run([manager = manager_, name]() {
+        return manager->scan_backend().capabilities(name);
+    }));
+}
+
+void CopyPage::refresh_printer_capabilities() {
+    const QString printer = printer_->currentData().toString();
+    if (printer.isEmpty()) {
+        return;
+    }
+    const std::string name = printer.toStdString();
+    auto* watcher = new QFutureWatcher<PrinterCapabilities>(this);
+    connect(watcher, &QFutureWatcher<PrinterCapabilities>::finished, this,
+        [this, watcher, printer]() {
+            try {
+                if (printer_->currentData().toString() != printer) {
+                    watcher->deleteLater();
+                    return;
+                }
+                const auto caps = watcher->result();
+                populate_strings(print_mode_, caps.color_modes, QStringLiteral("color"));
+                populate_strings(duplex_, caps.sides, QStringLiteral("one-sided"));
+                populate_strings(media_, caps.media, QStringLiteral("iso_a4_210x297mm"));
+                populate_strings(print_source_, caps.media_sources, {}, true);
+                populate_strings(media_type_, caps.media_types, {}, true);
+
+                {
+                    const QSignalBlocker blocker{quality_};
+                    quality_->clear();
+                    for (const int quality : caps.qualities) {
+                        quality_->addItem(quality_label(quality), quality);
+                    }
+                    int preferred = quality_->findData(4);
+                    if (preferred < 0 && quality_->count() > 0) {
+                        preferred = 0;
+                    }
+                    if (preferred >= 0) {
+                        quality_->setCurrentIndex(preferred);
+                    }
+                    quality_->setEnabled(!caps.qualities.empty());
+                }
+
+                copies_->setRange(
+                    std::max(1, caps.copies_min),
+                    std::max(std::max(1, caps.copies_min), caps.copies_max));
+                copies_->setValue(std::clamp(1, copies_->minimum(), copies_->maximum()));
+                status_->setText(
+                    QStringLiteral("Printer capabilities loaded — copies %1–%2")
+                        .arg(caps.copies_min)
+                        .arg(caps.copies_max));
+            } catch (const std::exception& error) {
+                status_->setText(
+                    QStringLiteral("Printer capability error: %1")
+                        .arg(QString::fromUtf8(error.what())));
+            }
+            watcher->deleteLater();
+        });
+    watcher->setFuture(QtConcurrent::run([manager = manager_, name]() {
+        return manager->print_backend().capabilities(name, false);
+    }));
 }
 
 void CopyPage::start_copy() {
@@ -177,14 +332,34 @@ void CopyPage::start_copy() {
 
     ScanSettings settings;
     settings.dpi = dpi_->currentData().toInt();
+    if (settings.dpi <= 0) {
+        settings.dpi = 300;
+    }
     settings.mode = scan_mode_->currentData().toString().toStdString();
-    settings.source = "Flatbed";
+    if (settings.mode.empty()) {
+        settings.mode = "Color";
+    }
+    settings.source = scan_source_->currentData().toString().toStdString();
+    if (settings.source.empty()) {
+        settings.source = "Flatbed";
+    }
 
     PrintProfile profile;
     profile.name = "Copy";
-    profile.color_mode = print_mode_->currentData().toString().toStdString();
-    profile.sides = duplex_->currentData().toString().toStdString();
-    profile.quality = 4;
+    if (print_mode_->currentIndex() >= 0) {
+        profile.color_mode = print_mode_->currentData().toString().toStdString();
+    }
+    if (duplex_->currentIndex() >= 0) {
+        profile.sides = duplex_->currentData().toString().toStdString();
+    }
+    if (quality_->currentIndex() >= 0) {
+        profile.quality = quality_->currentData().toInt();
+    }
+    if (media_->currentIndex() >= 0) {
+        profile.media = media_->currentData().toString().toStdString();
+    }
+    profile.media_source = print_source_->currentData().toString().toStdString();
+    profile.media_type = media_type_->currentData().toString().toStdString();
     profile.copies = copies_->value();
 
     copy_->setEnabled(false);
