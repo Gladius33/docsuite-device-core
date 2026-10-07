@@ -58,6 +58,7 @@ struct PrinterCapabilities {
 
 struct PrinterStatus {
     std::string printer;
+    std::string source{"cups"};
     DeviceState state{DeviceState::unknown};
     std::vector<std::string> reasons;
     std::vector<SupplyLevel> supplies;
