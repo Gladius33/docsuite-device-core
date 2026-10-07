@@ -7,9 +7,9 @@
 #include "pdf_export.hpp"
 
 #include <QApplication>
-#include <QByteArray>
 #include <QClipboard>
 #include <QComboBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -54,6 +54,16 @@ namespace {
     return frame;
 }
 
+[[nodiscard]] QString human_mode(const std::string& mode) {
+    const QString value = QString::fromStdString(mode);
+    if (value.compare(QStringLiteral("Gray"), Qt::CaseInsensitive) == 0 ||
+        value.contains(QStringLiteral("grey"), Qt::CaseInsensitive) ||
+        value.contains(QStringLiteral("gray"), Qt::CaseInsensitive)) {
+        return QStringLiteral("Grayscale");
+    }
+    return value;
+}
+
 } // namespace
 
 ScanPage::ScanPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
@@ -65,23 +75,22 @@ ScanPage::ScanPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
     auto* form = new QFormLayout();
 
     scanner_ = new QComboBox(settings_group);
+    source_ = new QComboBox(settings_group);
     mode_ = new QComboBox(settings_group);
-    mode_->addItem(QStringLiteral("Color"), QStringLiteral("Color"));
-    mode_->addItem(QStringLiteral("Grayscale"), QStringLiteral("Gray"));
     dpi_ = new QComboBox(settings_group);
-    for (const int dpi : {150, 300, 600}) {
-        dpi_->addItem(QStringLiteral("%1 dpi").arg(dpi), dpi);
-    }
-    dpi_->setCurrentIndex(1);
+    capabilities_ = new QLabel(QStringLiteral("Capabilities not loaded"), settings_group);
+    capabilities_->setWordWrap(true);
 
     form->addRow(QStringLiteral("Scanner"), scanner_);
+    form->addRow(QStringLiteral("Source"), source_);
     form->addRow(QStringLiteral("Mode"), mode_);
     form->addRow(QStringLiteral("Resolution"), dpi_);
+    form->addRow(QStringLiteral("Device"), capabilities_);
     settings_layout->addLayout(form, 1);
 
     auto* acquire_buttons = new QVBoxLayout();
     refresh_ = new QPushButton(QStringLiteral("Refresh scanners"), settings_group);
-    preview_ = new QPushButton(QStringLiteral("Preview 150 dpi"), settings_group);
+    preview_ = new QPushButton(QStringLiteral("Preview"), settings_group);
     scan_ = new QPushButton(QStringLiteral("Scan"), settings_group);
     acquire_buttons->addWidget(refresh_);
     acquire_buttons->addWidget(preview_);
@@ -142,12 +151,16 @@ ScanPage::ScanPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
                          save_pdf_, ocr_button_, copy_ocr_, save_ocr_}) {
         button->setEnabled(false);
     }
+    preview_->setEnabled(false);
+    scan_->setEnabled(false);
     if (!ocr_.available()) {
         ocr_button_->setToolTip(
             QStringLiteral("Tesseract was not available when DocSuite was built."));
     }
 
     connect(refresh_, &QPushButton::clicked, this, [this]() { refresh_scanners(); });
+    connect(scanner_, &QComboBox::currentIndexChanged, this,
+        [this](int) { load_capabilities(); });
     connect(preview_, &QPushButton::clicked, this, [this]() { start_scan(true); });
     connect(scan_, &QPushButton::clicked, this, [this]() { start_scan(false); });
     connect(rotate_left_, &QPushButton::clicked, this, [this]() { rotate(-90); });
@@ -177,6 +190,7 @@ void ScanPage::refresh_scanners() {
             try {
                 const QString previous = scanner_->currentData().toString();
                 const auto snapshot = watcher->result();
+                scanner_->blockSignals(true);
                 scanner_->clear();
                 int restore = -1;
                 for (const auto& scanner : snapshot.scanners) {
@@ -192,13 +206,22 @@ void ScanPage::refresh_scanners() {
                 if (restore >= 0) {
                     scanner_->setCurrentIndex(restore);
                 }
+                scanner_->blockSignals(false);
+
                 const bool available = scanner_->count() > 0;
-                preview_->setEnabled(available);
-                scan_->setEnabled(available);
                 status_->setText(
                     available
-                        ? QStringLiteral("%1 scanner(s) ready").arg(scanner_->count())
+                        ? QStringLiteral("%1 scanner(s) discovered — loading capabilities…")
+                              .arg(scanner_->count())
                         : QStringLiteral("No scanner discovered"));
+                if (available) {
+                    load_capabilities();
+                } else {
+                    source_->clear();
+                    mode_->clear();
+                    dpi_->clear();
+                    capabilities_->setText(QStringLiteral("No scanner"));
+                }
             } catch (const std::exception& error) {
                 status_->setText(
                     QStringLiteral("Scanner discovery error: %1")
@@ -210,6 +233,103 @@ void ScanPage::refresh_scanners() {
     watcher->setFuture(QtConcurrent::run([manager = manager_]() { return manager->snapshot(); }));
 }
 
+void ScanPage::load_capabilities() {
+    const QString scanner_name = scanner_->currentData().toString();
+    if (scanner_name.isEmpty()) {
+        return;
+    }
+
+    preview_->setEnabled(false);
+    scan_->setEnabled(false);
+    capabilities_->setText(QStringLiteral("Loading…"));
+    const std::string name = scanner_name.toStdString();
+
+    auto* watcher = new QFutureWatcher<ScannerCapabilities>(this);
+    connect(watcher, &QFutureWatcher<ScannerCapabilities>::finished, this,
+        [this, watcher, scanner_name]() {
+            try {
+                if (scanner_->currentData().toString() != scanner_name) {
+                    watcher->deleteLater();
+                    return;
+                }
+                const auto caps = watcher->result();
+
+                const QString old_source = source_->currentData().toString();
+                const QString old_mode = mode_->currentData().toString();
+                const int old_dpi = dpi_->currentData().toInt();
+
+                source_->clear();
+                mode_->clear();
+                dpi_->clear();
+
+                for (const auto& source : caps.sources) {
+                    source_->addItem(QString::fromStdString(source), QString::fromStdString(source));
+                }
+                if (source_->count() == 0) {
+                    source_->addItem(QStringLiteral("Flatbed"), QStringLiteral("Flatbed"));
+                }
+
+                for (const auto& mode : caps.modes) {
+                    mode_->addItem(human_mode(mode), QString::fromStdString(mode));
+                }
+                if (mode_->count() == 0) {
+                    mode_->addItem(QStringLiteral("Color"), QStringLiteral("Color"));
+                }
+
+                for (const int dpi : caps.resolutions_dpi) {
+                    dpi_->addItem(QStringLiteral("%1 dpi").arg(dpi), dpi);
+                }
+                if (dpi_->count() == 0) {
+                    for (const int dpi : {150, 300, 600}) {
+                        dpi_->addItem(QStringLiteral("%1 dpi").arg(dpi), dpi);
+                    }
+                }
+
+                const int source_index = source_->findData(old_source);
+                if (source_index >= 0) {
+                    source_->setCurrentIndex(source_index);
+                }
+                const int mode_index = mode_->findData(old_mode);
+                if (mode_index >= 0) {
+                    mode_->setCurrentIndex(mode_index);
+                } else {
+                    const int color = mode_->findData(QStringLiteral("Color"));
+                    if (color >= 0) {
+                        mode_->setCurrentIndex(color);
+                    }
+                }
+                int dpi_index = dpi_->findData(old_dpi > 0 ? old_dpi : 300);
+                if (dpi_index < 0) {
+                    dpi_index = dpi_->findData(300);
+                }
+                if (dpi_index >= 0) {
+                    dpi_->setCurrentIndex(dpi_index);
+                }
+
+                capabilities_->setText(
+                    QStringLiteral("SANE • bed up to %1 × %2 mm • %3 mode(s) • %4 resolution(s)")
+                        .arg(caps.max_width_mm, 0, 'f', 1)
+                        .arg(caps.max_height_mm, 0, 'f', 1)
+                        .arg(caps.modes.size())
+                        .arg(caps.resolutions_dpi.size()));
+                status_->setText(QStringLiteral("Scanner ready"));
+                preview_->setEnabled(true);
+                scan_->setEnabled(true);
+            } catch (const std::exception& error) {
+                capabilities_->setText(QStringLiteral("Capabilities unavailable"));
+                status_->setText(
+                    QStringLiteral("Capability query error: %1")
+                        .arg(QString::fromUtf8(error.what())));
+                preview_->setEnabled(true);
+                scan_->setEnabled(true);
+            }
+            watcher->deleteLater();
+        });
+    watcher->setFuture(QtConcurrent::run([manager = manager_, name]() {
+        return manager->scan_backend().capabilities(name);
+    }));
+}
+
 void ScanPage::start_scan(const bool preview) {
     const QString scanner_name = scanner_->currentData().toString();
     if (scanner_name.isEmpty()) {
@@ -217,9 +337,21 @@ void ScanPage::start_scan(const bool preview) {
     }
 
     ScanSettings settings;
-    settings.dpi = preview ? 150 : dpi_->currentData().toInt();
+    const int selected_dpi = dpi_->currentData().toInt();
+    if (preview) {
+        int preview_dpi = selected_dpi > 0 ? selected_dpi : 150;
+        for (int index = 0; index < dpi_->count(); ++index) {
+            const int candidate = dpi_->itemData(index).toInt();
+            if (candidate > 0 && candidate <= 150) {
+                preview_dpi = std::max(preview_dpi > 150 ? 0 : preview_dpi, candidate);
+            }
+        }
+        settings.dpi = preview_dpi > 0 ? preview_dpi : selected_dpi;
+    } else {
+        settings.dpi = selected_dpi;
+    }
     settings.mode = mode_->currentData().toString().toStdString();
-    settings.source = "Flatbed";
+    settings.source = source_->currentData().toString().toStdString();
 
     refresh_->setEnabled(false);
     preview_->setEnabled(false);
