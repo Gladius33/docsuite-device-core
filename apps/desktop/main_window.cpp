@@ -4,6 +4,7 @@
 
 #include "main_window.hpp"
 
+#include "copy_page.hpp"
 #include "devices_page.hpp"
 #include "print_page.hpp"
 #include "scan_page.hpp"
@@ -21,6 +22,7 @@ MainWindow::MainWindow(QWidget* parent)
     auto* tabs = new QTabWidget(this);
     tabs->addTab(new DevicesPage(manager_, tabs), QStringLiteral("Devices"));
     tabs->addTab(new ScanPage(manager_, tabs), QStringLiteral("Scan / OCR"));
+    tabs->addTab(new CopyPage(manager_, tabs), QStringLiteral("Copy"));
     tabs->addTab(new PrintPage(manager_, tabs), QStringLiteral("Print / Jobs"));
     setCentralWidget(tabs);
 }
