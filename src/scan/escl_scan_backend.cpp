@@ -6,14 +6,14 @@
 
 #include <cups/http.h>
 
-#include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstring>
+#include <initializer_list>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <unordered_set>
+#include <utility>
 
 namespace docsuite {
 namespace {
@@ -101,8 +101,6 @@ struct ParsedPrinterUri {
     }
 
     httpClearFields(connection);
-    httpSetField(connection, HTTP_FIELD_ACCEPT, "application/xml,text/xml,*/*");
-
     if (httpGet(connection, "/eSCL/ScannerCapabilities") != 0) {
         httpClose(connection);
         return false;
