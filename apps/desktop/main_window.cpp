@@ -7,6 +7,7 @@
 #include "copy_page.hpp"
 #include "device_service_gateway.hpp"
 #include "devices_page.hpp"
+#include "diagnostics_page.hpp"
 #include "document_page.hpp"
 #include "print_page.hpp"
 #include "scan_page.hpp"
@@ -36,6 +37,7 @@ MainWindow::MainWindow(QWidget* parent)
     tabs_->addTab(new DocumentPage(manager_, tabs_), QStringLiteral("Document"));
     tabs_->addTab(new CopyPage(manager_, tabs_), QStringLiteral("Copy"));
     tabs_->addTab(new PrintPage(manager_, tabs_), QStringLiteral("Print / Jobs"));
+    tabs_->addTab(new DiagnosticsPage(gateway_, tabs_), QStringLiteral("Diagnostics"));
     tabs_->addTab(new SystemPage(manager_, tabs_), QStringLiteral("System"));
     setCentralWidget(tabs_);
 
