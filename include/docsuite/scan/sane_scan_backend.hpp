@@ -11,7 +11,7 @@ namespace docsuite {
 
 class SaneScanBackend {
 public:
-    [[nodiscard]] std::vector<ScannerInfo> list_scanners() const;
+    [[nodiscard]] std::vector<ScannerInfo> list_scanners(bool include_virtual = false) const;
 };
 
 } // namespace docsuite
