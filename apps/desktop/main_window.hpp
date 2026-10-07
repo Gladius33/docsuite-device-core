@@ -9,14 +9,24 @@
 
 #include <memory>
 
+class QLabel;
+class QTimer;
+
 namespace docsuite::desktop {
+
+class DeviceServiceGateway;
 
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private:
+    void refresh_service_status();
+
     std::shared_ptr<DeviceManager> manager_;
+    std::shared_ptr<DeviceServiceGateway> gateway_;
+    QLabel* service_status_{nullptr};
+    QTimer* service_timer_{nullptr};
 };
 
 } // namespace docsuite::desktop
