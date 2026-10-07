@@ -4,6 +4,8 @@
 
 #include "devices_page.hpp"
 
+#include "device_service_gateway.hpp"
+
 #include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -103,8 +105,10 @@ struct PrinterDetails {
 
 } // namespace
 
-DevicesPage::DevicesPage(std::shared_ptr<DeviceManager> manager, QWidget* parent)
-    : QWidget{parent}, manager_{std::move(manager)} {
+DevicesPage::DevicesPage(
+    std::shared_ptr<DeviceServiceGateway> gateway,
+    QWidget* parent)
+    : QWidget{parent}, gateway_{std::move(gateway)} {
 
     auto* layout = new QVBoxLayout(this);
     auto* toolbar = new QHBoxLayout();
@@ -196,7 +200,7 @@ void DevicesPage::refresh() {
             refresh_button_->setEnabled(true);
             watcher->deleteLater();
         });
-    watcher->setFuture(QtConcurrent::run([manager = manager_]() { return manager->snapshot(); }));
+    watcher->setFuture(QtConcurrent::run([gateway = gateway_]() { return gateway->snapshot(); }));
 }
 
 void DevicesPage::load_printer_details(const QString& printer_name) {
@@ -224,10 +228,10 @@ void DevicesPage::load_printer_details(const QString& printer_name) {
         });
 
     const std::string name = printer_name.toStdString();
-    watcher->setFuture(QtConcurrent::run([manager = manager_, name]() {
+    watcher->setFuture(QtConcurrent::run([gateway = gateway_, name]() {
         return PrinterDetails{
-            .capabilities = manager->print_backend().capabilities(name),
-            .status = manager->print_backend().status(name),
+            .capabilities = gateway->printer_capabilities(name),
+            .status = gateway->printer_status(name),
         };
     }));
 }
