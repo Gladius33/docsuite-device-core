@@ -6,6 +6,7 @@
 #include "docsuite/image/image_processor.hpp"
 #include "docsuite/ocr/tesseract_ocr.hpp"
 #include "docsuite/print/job_manager.hpp"
+#include "docsuite/print/print_validation.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -33,6 +34,9 @@ int main() {
     caps.printer = "test-printer";
     caps.source = "ipp-direct";
     caps.color_modes = {"color", "monochrome"};
+    caps.media = {"iso_a4_210x297mm", "iso_a5_148x210mm"};
+    caps.media_types = {"stationery", "photographic"};
+    caps.media_sources = {"auto", "main", "rear"};
     caps.sides = {"one-sided", "two-sided-long-edge"};
     caps.qualities = {3, 4, 5};
     caps.resolutions_dpi = {600};
@@ -41,6 +45,35 @@ int main() {
     assert(caps.color_modes.size() == 2U);
     assert(caps.qualities.at(1) == 4);
     assert(caps.copies_max == 99);
+
+    const auto valid_preflight = docsuite::validate_print_profile(caps, mono);
+    assert(valid_preflight.ok);
+    assert(valid_preflight.errors.empty());
+    assert(valid_preflight.warnings.empty());
+
+    auto invalid_color = mono;
+    invalid_color.color_mode = "sepia";
+    const auto invalid_color_preflight = docsuite::validate_print_profile(caps, invalid_color);
+    assert(!invalid_color_preflight.ok);
+    assert(!invalid_color_preflight.errors.empty());
+
+    auto invalid_copies = mono;
+    invalid_copies.copies = 100;
+    const auto invalid_copies_preflight = docsuite::validate_print_profile(caps, invalid_copies);
+    assert(!invalid_copies_preflight.ok);
+    assert(!invalid_copies_preflight.errors.empty());
+
+    auto invalid_media = mono;
+    invalid_media.media = "na_arch-e_12x18in";
+    const auto invalid_media_preflight = docsuite::validate_print_profile(caps, invalid_media);
+    assert(!invalid_media_preflight.ok);
+
+    auto incomplete_caps = caps;
+    incomplete_caps.media_sources.clear();
+    incomplete_caps.media_types.clear();
+    const auto warning_preflight = docsuite::validate_print_profile(incomplete_caps, mono);
+    assert(warning_preflight.ok);
+    assert(warning_preflight.warnings.size() == 2U);
 
     docsuite::ScannerCapabilities scanner_caps{};
     scanner_caps.scanner = "airscan:test";
