@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 cmake_minimum_required(VERSION 3.25)
-project(docsuite_device_core VERSION 0.3.0 LANGUAGES CXX)
+project(docsuite_device_core VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,7 @@ include(CTest)
 
 option(DOCSUITE_BUILD_DESKTOP "Build the Qt desktop application" ON)
 option(DOCSUITE_BUILD_TESTS "Build tests" ON)
+option(DOCSUITE_ENABLE_OCR "Enable Tesseract OCR when available" ON)
 
 find_path(CUPS_INCLUDE_DIR cups/cups.h REQUIRED)
 find_library(CUPS_LIBRARY NAMES cups REQUIRED)
@@ -22,6 +23,7 @@ find_library(SANE_LIBRARY NAMES sane REQUIRED)
 
 add_library(docsuite_device_core
     src/device/device_manager.cpp
+    src/ocr/tesseract_ocr.cpp
     src/print/cups_print_backend.cpp
     src/print/job_manager.cpp
     src/scan/escl_scan_backend.cpp
@@ -44,6 +46,20 @@ target_link_libraries(docsuite_device_core
         ${SANE_LIBRARY}
 )
 
+if(DOCSUITE_ENABLE_OCR)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(TESSERACT QUIET IMPORTED_TARGET tesseract)
+    endif()
+    if(TESSERACT_FOUND)
+        target_link_libraries(docsuite_device_core PRIVATE PkgConfig::TESSERACT)
+        target_compile_definitions(docsuite_device_core PRIVATE DOCSUITE_HAVE_TESSERACT=1)
+        message(STATUS "DocSuite OCR: Tesseract enabled")
+    else()
+        message(STATUS "DocSuite OCR: Tesseract not found, OCR disabled")
+    endif()
+endif()
+
 target_compile_options(docsuite_device_core PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
@@ -57,7 +73,12 @@ set_target_properties(docsuite-device-cli PROPERTIES
 if(DOCSUITE_BUILD_DESKTOP)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Concurrent)
     qt_standard_project_setup()
-    qt_add_executable(docsuite-device-center apps/desktop/main.cpp)
+    qt_add_executable(
+        docsuite-device-center
+        apps/desktop/main.cpp
+        apps/desktop/device_center_window.cpp
+        apps/desktop/device_center_window.hpp
+    )
     target_link_libraries(
         docsuite-device-center
         PRIVATE
