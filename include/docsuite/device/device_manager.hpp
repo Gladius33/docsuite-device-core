@@ -18,6 +18,7 @@ public:
     [[nodiscard]] DeviceSnapshot snapshot() const;
     [[nodiscard]] const CupsPrintBackend& print_backend() const noexcept { return print_backend_; }
     [[nodiscard]] const JobManager& job_manager() const noexcept { return job_manager_; }
+    [[nodiscard]] const SaneScanBackend& scan_backend() const noexcept { return scan_backend_; }
 
 private:
     CupsPrintBackend print_backend_{};
