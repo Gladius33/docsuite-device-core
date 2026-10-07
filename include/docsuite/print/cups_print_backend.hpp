@@ -28,6 +28,11 @@ public:
         const PrintProfile& profile,
         bool force_refresh = false) const;
 
+    [[nodiscard]] PrintPreflightResult preflight_detailed(
+        const std::string& printer,
+        const PrintProfile& profile,
+        bool force_refresh = false) const;
+
     [[nodiscard]] int print_file(
         const std::string& printer,
         const std::string& path,
