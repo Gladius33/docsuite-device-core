@@ -144,7 +144,7 @@ void append_unique_scanner(std::vector<ScannerInfo>& scanners, ScannerInfo candi
             }
         }
     } catch (...) {
-        // A stale SANE discovery must not prevent a direct eSCL fallback attempt.
+        // Stale or unavailable SANE discovery must not prevent direct eSCL fallback.
     }
 
     for (const auto& candidate : escl.probe_printers(print.list_printers())) {
@@ -159,7 +159,7 @@ void append_unique_scanner(std::vector<ScannerInfo>& scanners, ScannerInfo candi
 
 DeviceSnapshot DeviceManager::snapshot() const {
     auto printers = print_backend_.list_printers();
-    const auto sane_scanners = scan_backend_.list_scanners();
+    const auto sane_scanners = sane_backend_.list_scanners();
 
     std::vector<ScannerInfo> scanners;
     scanners.reserve(sane_scanners.size() + printers.size());
@@ -184,11 +184,11 @@ ScannerCapabilities DeviceManager::scanner_capabilities(const std::string& scann
     }
 
     try {
-        return scan_backend_.capabilities(scanner);
+        return sane_backend_.capabilities(scanner);
     } catch (const std::exception& sane_error) {
         const auto direct = matching_direct_escl(
             scanner,
-            scan_backend_,
+            sane_backend_,
             escl_backend_,
             print_backend_);
         if (!direct.has_value()) {
@@ -213,7 +213,7 @@ ScanFrame DeviceManager::scan(
     }
 
     try {
-        return scan_backend_.scan(scanner, settings);
+        return sane_backend_.scan(scanner, settings);
     } catch (const std::exception& sane_error) {
         if (!escl_backend_.acquisition_available()) {
             throw;
@@ -221,7 +221,7 @@ ScanFrame DeviceManager::scan(
 
         const auto direct = matching_direct_escl(
             scanner,
-            scan_backend_,
+            sane_backend_,
             escl_backend_,
             print_backend_);
         if (!direct.has_value()) {
@@ -236,6 +236,12 @@ ScanFrame DeviceManager::scan(
                 "; direct eSCL fallback failed: " + escl_error.what());
         }
     }
+}
+
+void DeviceManager::save_pnm(
+    const ScanFrame& frame,
+    const std::string& path) const {
+    sane_backend_.save_pnm(frame, path);
 }
 
 } // namespace docsuite
