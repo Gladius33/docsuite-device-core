@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.docsuite.DeviceCenter</id>
+  <name>DocSuite Device Center</name>
+  <summary>Native Linux printing, scanning, OCR and device diagnostics</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <developer id="io.docsuite">
+    <name>DocSuite Project</name>
+  </developer>
+  <description>
+    <p>
+      DocSuite Device Center provides standards-first printer and scanner
+      management for Linux using IPP/CUPS, SANE and direct eSCL backends.
+    </p>
+    <p>
+      It includes physical device capability and status discovery, dynamic
+      print controls, scan preview and document processing, OCR, searchable
+      PDF export, multipage document sessions, copy workflows, job diagnostics
+      and a local per-user device service.
+    </p>
+  </description>
+  <launchable type="desktop-id">docsuite-device-center.desktop</launchable>
+  <provides>
+    <binary>docsuite-device-center</binary>
+  </provides>
+  <categories>
+    <category>Office</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>printer</keyword>
+    <keyword>scanner</keyword>
+    <keyword>IPP</keyword>
+    <keyword>SANE</keyword>
+    <keyword>OCR</keyword>
+    <keyword>PDF</keyword>
+  </keywords>
+  <releases>
+    <release version="0.5.0" date="2026-10-07">
+      <description>
+        <p>Development milestone with IPP printing, SANE/eSCL scanning, OCR,
+        document processing, diagnostics and Debian packaging.</p>
+      </description>
+    </release>
+  </releases>
+  <url type="homepage">https://github.com/Gladius33/docsuite-device-core</url>
+  <url type="bugtracker">https://github.com/Gladius33/docsuite-device-core/issues</url>
+  <content_rating type="oars-1.1" />
+</component>
