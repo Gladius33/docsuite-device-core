@@ -61,6 +61,7 @@ QString format_details(const PrinterDetails& details) {
     const auto& status = details.status;
 
     QString text;
+    text += QString("Status source: %1\n").arg(QString::fromStdString(status.source));
     text += QString("State: %1\n").arg(state_name(status.state));
     text += QString("Accepting jobs: %1\n").arg(status.accepting_jobs ? "yes" : "no");
     text += QString("Reasons: %1\n\n").arg(join_strings(status.reasons));
@@ -78,7 +79,7 @@ QString format_details(const PrinterDetails& details) {
 
     text += "Supplies\n";
     if (status.supplies.empty()) {
-        text += "  Not reported by CUPS\n";
+        text += "  Not reported by device\n";
     }
     for (const auto& supply : status.supplies) {
         text += "  " + QString::fromStdString(supply.name) + ": ";
