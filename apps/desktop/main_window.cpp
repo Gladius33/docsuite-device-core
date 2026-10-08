@@ -19,9 +19,24 @@
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <QtConcurrent>
 
 namespace docsuite::desktop {
+namespace {
+
+[[nodiscard]] QWidget* placeholder(const QString& text, QWidget* parent) {
+    auto* widget = new QWidget(parent);
+    auto* layout = new QVBoxLayout(widget);
+    auto* label = new QLabel(text, widget);
+    label->setAlignment(Qt::AlignCenter);
+    layout->addStretch();
+    layout->addWidget(label);
+    layout->addStretch();
+    return widget;
+}
+
+} // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow{parent},
@@ -32,14 +47,21 @@ MainWindow::MainWindow(QWidget* parent)
     resize(1280, 860);
 
     tabs_ = new QTabWidget(this);
-    tabs_->addTab(new DevicesPage(gateway_, tabs_), QStringLiteral("Devices"));
-    tabs_->addTab(new ScanPage(manager_, tabs_), QStringLiteral("Scan / OCR"));
-    tabs_->addTab(new DocumentPage(manager_, tabs_), QStringLiteral("Document"));
-    tabs_->addTab(new CopyPage(manager_, tabs_), QStringLiteral("Copy"));
-    tabs_->addTab(new PrintPage(manager_, tabs_), QStringLiteral("Print / Jobs"));
-    tabs_->addTab(new DiagnosticsPage(gateway_, tabs_), QStringLiteral("Diagnostics"));
-    tabs_->addTab(new SystemPage(manager_, tabs_), QStringLiteral("System"));
+    devices_page_ = new DevicesPage(gateway_, tabs_);
+    tabs_->addTab(devices_page_, QStringLiteral("Devices"));
+    tabs_->addTab(placeholder(QStringLiteral("Open this tab to initialize scanner tools."), tabs_), QStringLiteral("Scan / OCR"));
+    tabs_->addTab(placeholder(QStringLiteral("Open this tab to initialize document tools."), tabs_), QStringLiteral("Document"));
+    tabs_->addTab(placeholder(QStringLiteral("Open this tab to initialize copy tools."), tabs_), QStringLiteral("Copy"));
+    tabs_->addTab(placeholder(QStringLiteral("Open this tab to initialize printing tools."), tabs_), QStringLiteral("Print / Jobs"));
+    tabs_->addTab(placeholder(QStringLiteral("Open this tab to initialize diagnostics."), tabs_), QStringLiteral("Diagnostics"));
+    tabs_->addTab(placeholder(QStringLiteral("Open this tab to initialize system integration."), tabs_), QStringLiteral("System"));
     setCentralWidget(tabs_);
+
+    connect(tabs_, &QTabWidget::currentChanged, this, [this](const int index) {
+        ensure_tab_loaded(index);
+        refresh_active_tab(index);
+        QSettings{}.setValue(QStringLiteral("window/tab"), index);
+    });
 
     QSettings settings;
     const QByteArray geometry = settings.value(QStringLiteral("window/geometry")).toByteArray();
@@ -49,10 +71,9 @@ MainWindow::MainWindow(QWidget* parent)
     const int saved_tab = settings.value(QStringLiteral("window/tab"), 0).toInt();
     if (saved_tab >= 0 && saved_tab < tabs_->count()) {
         tabs_->setCurrentIndex(saved_tab);
+        ensure_tab_loaded(saved_tab);
+        refresh_active_tab(saved_tab);
     }
-    connect(tabs_, &QTabWidget::currentChanged, this, [](const int index) {
-        QSettings{}.setValue(QStringLiteral("window/tab"), index);
-    });
 
     service_status_ = new QLabel(QStringLiteral("Service: checking…"), this);
     service_status_->setToolTip(QStringLiteral(
@@ -64,13 +85,89 @@ MainWindow::MainWindow(QWidget* parent)
     connect(service_timer_, &QTimer::timeout, this, [this]() { refresh_service_status(); });
     service_timer_->start();
     refresh_service_status();
+
+    // Device hot-plug/power-on polling is deliberately lightweight and only runs
+    // while the Devices page is visible. Heavy scanner/IPP initialization for the
+    // other tabs is lazy and happens only when the user opens the tab.
+    discovery_timer_ = new QTimer(this);
+    discovery_timer_->setInterval(15000);
+    connect(discovery_timer_, &QTimer::timeout, this, [this]() {
+        if (tabs_->currentIndex() == 0 && devices_page_ != nullptr) {
+            devices_page_->refresh();
+        }
+    });
+    discovery_timer_->start();
 }
 
 MainWindow::~MainWindow() {
+    if (service_timer_ != nullptr) {
+        service_timer_->stop();
+    }
+    if (discovery_timer_ != nullptr) {
+        discovery_timer_->stop();
+    }
+
     QSettings settings;
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
     if (tabs_ != nullptr) {
         settings.setValue(QStringLiteral("window/tab"), tabs_->currentIndex());
+    }
+}
+
+void MainWindow::ensure_tab_loaded(const int index) {
+    if (index < 0 || index >= static_cast<int>(tab_loaded_.size()) || tab_loaded_[index]) {
+        return;
+    }
+
+    QWidget* replacement = nullptr;
+    switch (index) {
+        case 1: replacement = new ScanPage(manager_, tabs_); break;
+        case 2: replacement = new DocumentPage(manager_, tabs_); break;
+        case 3: replacement = new CopyPage(manager_, tabs_); break;
+        case 4: replacement = new PrintPage(manager_, tabs_); break;
+        case 5: replacement = new DiagnosticsPage(gateway_, tabs_); break;
+        case 6: replacement = new SystemPage(manager_, tabs_); break;
+        default: return;
+    }
+
+    tab_loaded_[index] = true;
+    QWidget* old = tabs_->widget(index);
+    const QString title = tabs_->tabText(index);
+    tabs_->removeTab(index);
+    tabs_->insertTab(index, replacement, title);
+    tabs_->setCurrentIndex(index);
+    if (old != nullptr) {
+        old->deleteLater();
+    }
+}
+
+void MainWindow::refresh_active_tab(const int index) {
+    // Pages already perform an initial refresh when they are constructed. On
+    // subsequent visits, refresh only the device-facing pages so hardware that
+    // was powered on after application startup is discovered without polling all
+    // backends continuously in the background.
+    if (index == 0 && devices_page_ != nullptr) {
+        devices_page_->refresh();
+        return;
+    }
+
+    if (!tab_loaded_[index]) {
+        return;
+    }
+
+    if (index == 1) {
+        if (auto* page = qobject_cast<ScanPage*>(tabs_->widget(index)); page != nullptr) {
+            page->refresh_scanners();
+        }
+    } else if (index == 3) {
+        if (auto* page = qobject_cast<CopyPage*>(tabs_->widget(index)); page != nullptr) {
+            page->refresh_devices();
+        }
+    } else if (index == 4) {
+        if (auto* page = qobject_cast<PrintPage*>(tabs_->widget(index)); page != nullptr) {
+            page->refresh_printers();
+            page->refresh_jobs();
+        }
     }
 }
 
