@@ -60,7 +60,7 @@ jobs:
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           sleep 0.5
           ./build/apps/cli/docsuite-device-cli \
-            scan 'escl:http://127.0.0.1:18080' build/escl-mock.pnm 300 color
+            scan 'escl:http://127.0.0.1:18080/eSCL' build/escl-mock.pnm 300 color
           python3 - <<'PY'
           from pathlib import Path
           data = Path('build/escl-mock.pnm').read_bytes()
@@ -118,11 +118,13 @@ jobs:
           assert ping['result']['service'] == 'docsuite-device-service'
           assert ping['result']['version'] == '0.5.0'
 
+          direct_scanner = 'escl:http://127.0.0.1:18081/eSCL'
+
           invalid_dpi = rpc({
               'id': 2,
               'method': 'scanner.scan',
               'params': {
-                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'scanner': direct_scanner,
                   'dpi': 72,
                   'mode': 'Color',
               },
@@ -135,7 +137,7 @@ jobs:
               'id': 3,
               'method': 'scanner.scan',
               'params': {
-                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'scanner': direct_scanner,
                   'dpi': 300.5,
                   'mode': 'Color',
               },
@@ -147,7 +149,7 @@ jobs:
               'id': 4,
               'method': 'scanner.scan',
               'params': {
-                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'scanner': direct_scanner,
                   'dpi': 300,
                   'mode': 'RawDeviceCommand',
               },
@@ -178,7 +180,7 @@ jobs:
               'id': 7,
               'method': 'scanner.scan',
               'params': {
-                  'scanner': 'escl:http://127.0.0.1:18081',
+                  'scanner': direct_scanner,
                   'dpi': 300,
                   'mode': 'Color',
                   'source': 'Flatbed',
