@@ -6,12 +6,21 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QTimer>
 
 #include <cstdlib>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    app.setQuitOnLastWindowClosed(true);
+    QObject::connect(
+        &app,
+        &QGuiApplication::lastWindowClosed,
+        &app,
+        &QCoreApplication::quit,
+        Qt::QueuedConnection);
+
     QCoreApplication::setOrganizationName(QStringLiteral("DocSuite Project"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("docsuite.local"));
     QCoreApplication::setApplicationName(QStringLiteral("DocSuite Device Center"));
