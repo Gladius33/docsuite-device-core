@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QTabWidget>
 #include <QTimer>
 
 #include <cstdlib>
@@ -36,7 +37,18 @@ int main(int argc, char** argv) {
     window.show();
 
     if (smoke_test) {
-        QTimer::singleShot(1200, &app, &QCoreApplication::quit);
+        // Reproduce a user rapidly visiting every lazy-loaded page. Hardware
+        // access remains disabled by DOCSUITE_SMOKE_TEST, but all page
+        // constructors, watchers and tab replacement paths are exercised.
+        QTimer::singleShot(0, &window, [&window]() {
+            if (auto* tabs = window.findChild<QTabWidget*>(); tabs != nullptr) {
+                for (int index = 0; index < tabs->count(); ++index) {
+                    tabs->setCurrentIndex(index);
+                }
+                tabs->setCurrentIndex(0);
+            }
+        });
+        QTimer::singleShot(1800, &app, &QCoreApplication::quit);
     }
 
     return app.exec();
