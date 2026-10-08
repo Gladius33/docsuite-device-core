@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "docsuite/device/device_manager.hpp"
+#include "docsuite/scan/sane_runtime.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -169,7 +170,12 @@ DeviceSnapshot DeviceManager::snapshot() const {
     }
 
     auto printers = print_backend_.list_printers();
-    const auto sane_scanners = sane_backend_.list_scanners();
+
+    std::vector<ScannerInfo> sane_scanners;
+    {
+        detail::SaneRuntimeGuard sane_guard;
+        sane_scanners = sane_backend_.list_scanners();
+    }
 
     std::vector<ScannerInfo> scanners;
     scanners.reserve(sane_scanners.size() + printers.size());
@@ -193,6 +199,7 @@ ScannerCapabilities DeviceManager::scanner_capabilities(const std::string& scann
         return escl_backend_.capabilities(scanner);
     }
 
+    detail::SaneRuntimeGuard sane_guard;
     try {
         return sane_backend_.capabilities(scanner);
     } catch (const std::exception& sane_error) {
@@ -222,6 +229,7 @@ ScanFrame DeviceManager::scan(
         return escl_backend_.scan(scanner, settings);
     }
 
+    detail::SaneRuntimeGuard sane_guard;
     try {
         return sane_backend_.scan(scanner, settings);
     } catch (const std::exception& sane_error) {
