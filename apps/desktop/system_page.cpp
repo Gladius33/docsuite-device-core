@@ -128,12 +128,16 @@ namespace {
         photo.media_source = "rear";
     }
 
-    return {
-        {"mono", std::move(monochrome)},
-        {"draft", std::move(draft)},
-        {"duplex", std::move(duplex)},
-        {"photo", std::move(photo)},
-    };
+    // Build the vector explicitly. GCC 16 can emit a false-positive
+    // -Wfree-nonheap-object when an initializer_list contains moved profile
+    // objects and the vector destructor is aggressively inlined.
+    std::vector<std::pair<std::string, PrintProfile>> profiles;
+    profiles.reserve(4U);
+    profiles.emplace_back("mono", std::move(monochrome));
+    profiles.emplace_back("draft", std::move(draft));
+    profiles.emplace_back("duplex", std::move(duplex));
+    profiles.emplace_back("photo", std::move(photo));
+    return profiles;
 }
 
 } // namespace
