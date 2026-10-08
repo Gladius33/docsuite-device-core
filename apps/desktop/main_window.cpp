@@ -16,6 +16,7 @@
 #include <QFutureWatcher>
 #include <QLabel>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTimer>
@@ -58,8 +59,12 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(tabs_);
 
     connect(tabs_, &QTabWidget::currentChanged, this, [this](const int index) {
+        const bool was_loaded =
+            index >= 0 && index < static_cast<int>(tab_loaded_.size()) && tab_loaded_[index];
         ensure_tab_loaded(index);
-        refresh_active_tab(index);
+        if (was_loaded) {
+            refresh_active_tab(index);
+        }
         QSettings{}.setValue(QStringLiteral("window/tab"), index);
     });
 
@@ -69,10 +74,9 @@ MainWindow::MainWindow(QWidget* parent)
         restoreGeometry(geometry);
     }
     const int saved_tab = settings.value(QStringLiteral("window/tab"), 0).toInt();
-    if (saved_tab >= 0 && saved_tab < tabs_->count()) {
+    if (saved_tab >= 0 && saved_tab < tabs_->count() && saved_tab != 0) {
         tabs_->setCurrentIndex(saved_tab);
         ensure_tab_loaded(saved_tab);
-        refresh_active_tab(saved_tab);
     }
 
     service_status_ = new QLabel(QStringLiteral("Service: checking…"), this);
@@ -86,9 +90,6 @@ MainWindow::MainWindow(QWidget* parent)
     service_timer_->start();
     refresh_service_status();
 
-    // Device hot-plug/power-on polling is deliberately lightweight and only runs
-    // while the Devices page is visible. Heavy scanner/IPP initialization for the
-    // other tabs is lazy and happens only when the user opens the tab.
     discovery_timer_ = new QTimer(this);
     discovery_timer_->setInterval(15000);
     connect(discovery_timer_, &QTimer::timeout, this, [this]() {
@@ -133,6 +134,7 @@ void MainWindow::ensure_tab_loaded(const int index) {
     tab_loaded_[index] = true;
     QWidget* old = tabs_->widget(index);
     const QString title = tabs_->tabText(index);
+    const QSignalBlocker blocker{tabs_};
     tabs_->removeTab(index);
     tabs_->insertTab(index, replacement, title);
     tabs_->setCurrentIndex(index);
@@ -142,29 +144,25 @@ void MainWindow::ensure_tab_loaded(const int index) {
 }
 
 void MainWindow::refresh_active_tab(const int index) {
-    // Pages already perform an initial refresh when they are constructed. On
-    // subsequent visits, refresh only the device-facing pages so hardware that
-    // was powered on after application startup is discovered without polling all
-    // backends continuously in the background.
     if (index == 0 && devices_page_ != nullptr) {
         devices_page_->refresh();
         return;
     }
 
-    if (!tab_loaded_[index]) {
+    if (index < 0 || index >= static_cast<int>(tab_loaded_.size()) || !tab_loaded_[index]) {
         return;
     }
 
     if (index == 1) {
-        if (auto* page = qobject_cast<ScanPage*>(tabs_->widget(index)); page != nullptr) {
+        if (auto* page = dynamic_cast<ScanPage*>(tabs_->widget(index)); page != nullptr) {
             page->refresh_scanners();
         }
     } else if (index == 3) {
-        if (auto* page = qobject_cast<CopyPage*>(tabs_->widget(index)); page != nullptr) {
+        if (auto* page = dynamic_cast<CopyPage*>(tabs_->widget(index)); page != nullptr) {
             page->refresh_devices();
         }
     } else if (index == 4) {
-        if (auto* page = qobject_cast<PrintPage*>(tabs_->widget(index)); page != nullptr) {
+        if (auto* page = dynamic_cast<PrintPage*>(tabs_->widget(index)); page != nullptr) {
             page->refresh_printers();
             page->refresh_jobs();
         }
