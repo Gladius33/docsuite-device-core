@@ -145,6 +145,7 @@ DevicesPage::DevicesPage(
         [this](QListWidgetItem* current, QListWidgetItem*) {
             if (current == nullptr) {
                 details_printer_.clear();
+                pending_details_printer_.clear();
                 details_->clear();
                 return;
             }
@@ -226,6 +227,7 @@ void DevicesPage::refresh(const bool refresh_selected_details) {
                     }
                 } else {
                     details_printer_.clear();
+                    pending_details_printer_.clear();
                     details_->clear();
                 }
             } catch (const std::exception& error) {
@@ -239,10 +241,24 @@ void DevicesPage::refresh(const bool refresh_selected_details) {
     watcher->setFuture(QtConcurrent::run([gateway = gateway_]() { return gateway->snapshot(); }));
 }
 
+void DevicesPage::refresh_selected_details() {
+    if (printers_->currentItem() == nullptr) {
+        return;
+    }
+    load_printer_details(printers_->currentItem()->data(Qt::UserRole).toString());
+}
+
 void DevicesPage::load_printer_details(const QString& printer_name) {
     if (printer_name.isEmpty()) {
         return;
     }
+    if (details_refresh_in_progress_) {
+        pending_details_printer_ = printer_name;
+        return;
+    }
+
+    details_refresh_in_progress_ = true;
+    pending_details_printer_.clear();
     details_printer_ = printer_name;
     details_->setPlainText(QStringLiteral("Loading physical printer data…"));
 
@@ -263,7 +279,15 @@ void DevicesPage::load_printer_details(const QString& printer_name) {
                             .arg(QString::fromUtf8(error.what())));
                 }
             }
+
+            details_refresh_in_progress_ = false;
+            const QString pending = pending_details_printer_;
+            pending_details_printer_.clear();
             watcher->deleteLater();
+
+            if (!pending.isEmpty()) {
+                load_printer_details(pending);
+            }
         });
 
     const std::string name = printer_name.toStdString();
