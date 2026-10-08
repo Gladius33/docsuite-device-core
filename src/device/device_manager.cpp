@@ -125,34 +125,32 @@ void append_unique_scanner(std::vector<ScannerInfo>& scanners, ScannerInfo candi
     }
 }
 
+// Only names produced by our direct eSCL backend are routed directly.
+// SANE/airscan can itself expose names beginning with "escl:https://...";
+// those names must first be handed back to SANE instead of being mistaken
+// for a DocSuite direct endpoint.
 [[nodiscard]] bool direct_escl_name(const std::string& scanner) {
-    return scanner.rfind("escl:http://", 0) == 0 || scanner.rfind("escl:https://", 0) == 0;
+    const bool scheme = scanner.rfind("escl:http://", 0) == 0 ||
+        scanner.rfind("escl:https://", 0) == 0;
+    if (!scheme) {
+        return false;
+    }
+    return scanner.find("/eSCL") != std::string::npos ||
+        scanner.find("/escl") != std::string::npos;
 }
 
 [[nodiscard]] std::optional<ScannerInfo> matching_direct_escl(
     const std::string& requested,
-    const SaneScanBackend& sane,
     const EsclScanBackend& escl,
     const CupsPrintBackend& print) {
 
-    ScannerInfo requested_info{
+    const ScannerInfo requested_info{
         .name = requested,
         .vendor = {},
         .model = requested,
         .type = {},
         .backend = "requested",
     };
-
-    try {
-        for (const auto& candidate : sane.list_scanners()) {
-            if (candidate.name == requested) {
-                requested_info = candidate;
-                break;
-            }
-        }
-    } catch (...) {
-        // Stale or unavailable SANE discovery must not prevent direct eSCL fallback.
-    }
 
     for (const auto& candidate : escl.probe_printers(print.list_printers())) {
         if (same_scanner(requested_info, candidate)) {
@@ -171,21 +169,26 @@ DeviceSnapshot DeviceManager::snapshot() const {
 
     auto printers = print_backend_.list_printers();
 
-    std::vector<ScannerInfo> sane_scanners;
-    {
-        detail::SaneRuntimeGuard sane_guard;
-        sane_scanners = sane_backend_.list_scanners();
-    }
-
+    // Network multifunction devices already known through IPP can be probed
+    // directly over eSCL in a few seconds. Prefer that path before invoking a
+    // full SANE backend enumeration; Canon BJNP discovery can take tens of
+    // seconds and is unnecessary when the same scanner was found directly.
     std::vector<ScannerInfo> scanners;
-    scanners.reserve(sane_scanners.size() + printers.size());
-    for (const auto& scanner : sane_scanners) {
-        append_unique_scanner(scanners, scanner);
-    }
-
     const auto direct_escl = escl_backend_.probe_printers(printers);
+    scanners.reserve(direct_escl.size() + printers.size());
     for (const auto& candidate : direct_escl) {
         append_unique_scanner(scanners, candidate);
+    }
+
+    if (scanners.empty()) {
+        std::vector<ScannerInfo> sane_scanners;
+        {
+            detail::SaneRuntimeGuard sane_guard;
+            sane_scanners = sane_backend_.list_scanners();
+        }
+        for (const auto& scanner : sane_scanners) {
+            append_unique_scanner(scanners, scanner);
+        }
     }
 
     return DeviceSnapshot{
@@ -199,25 +202,28 @@ ScannerCapabilities DeviceManager::scanner_capabilities(const std::string& scann
         return escl_backend_.capabilities(scanner);
     }
 
-    detail::SaneRuntimeGuard sane_guard;
+    std::string sane_error_message;
     try {
+        detail::SaneRuntimeGuard sane_guard;
         return sane_backend_.capabilities(scanner);
     } catch (const std::exception& sane_error) {
-        const auto direct = matching_direct_escl(
-            scanner,
-            sane_backend_,
-            escl_backend_,
-            print_backend_);
-        if (!direct.has_value()) {
-            throw;
-        }
-        try {
-            return escl_backend_.capabilities(direct->name);
-        } catch (const std::exception& escl_error) {
-            throw std::runtime_error(
-                std::string{"SANE capabilities failed: "} + sane_error.what() +
-                "; direct eSCL fallback failed: " + escl_error.what());
-        }
+        sane_error_message = sane_error.what();
+    }
+
+    const auto direct = matching_direct_escl(
+        scanner,
+        escl_backend_,
+        print_backend_);
+    if (!direct.has_value()) {
+        throw std::runtime_error("SANE capabilities failed: " + sane_error_message);
+    }
+
+    try {
+        return escl_backend_.capabilities(direct->name);
+    } catch (const std::exception& escl_error) {
+        throw std::runtime_error(
+            "SANE capabilities failed: " + sane_error_message +
+            "; direct eSCL fallback failed: " + escl_error.what());
     }
 }
 
@@ -229,30 +235,32 @@ ScanFrame DeviceManager::scan(
         return escl_backend_.scan(scanner, settings);
     }
 
-    detail::SaneRuntimeGuard sane_guard;
+    std::string sane_error_message;
     try {
+        detail::SaneRuntimeGuard sane_guard;
         return sane_backend_.scan(scanner, settings);
     } catch (const std::exception& sane_error) {
-        if (!escl_backend_.acquisition_available()) {
-            throw;
-        }
+        sane_error_message = sane_error.what();
+    }
 
-        const auto direct = matching_direct_escl(
-            scanner,
-            sane_backend_,
-            escl_backend_,
-            print_backend_);
-        if (!direct.has_value()) {
-            throw;
-        }
+    if (!escl_backend_.acquisition_available()) {
+        throw std::runtime_error("SANE acquisition failed: " + sane_error_message);
+    }
 
-        try {
-            return escl_backend_.scan(direct->name, settings);
-        } catch (const std::exception& escl_error) {
-            throw std::runtime_error(
-                std::string{"SANE acquisition failed: "} + sane_error.what() +
-                "; direct eSCL fallback failed: " + escl_error.what());
-        }
+    const auto direct = matching_direct_escl(
+        scanner,
+        escl_backend_,
+        print_backend_);
+    if (!direct.has_value()) {
+        throw std::runtime_error("SANE acquisition failed: " + sane_error_message);
+    }
+
+    try {
+        return escl_backend_.scan(direct->name, settings);
+    } catch (const std::exception& escl_error) {
+        throw std::runtime_error(
+            "SANE acquisition failed: " + sane_error_message +
+            "; direct eSCL fallback failed: " + escl_error.what());
     }
 }
 
