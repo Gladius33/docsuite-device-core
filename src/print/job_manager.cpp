@@ -7,6 +7,7 @@
 #include <cups/cups.h>
 #include <cups/ipp.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +18,8 @@
 
 namespace docsuite {
 namespace {
+
+constexpr std::size_t kRecentTerminalJobLimit = 10U;
 
 [[nodiscard]] PrintJobState from_ipp_state(const ipp_jstate_t state) noexcept {
     switch (state) {
@@ -213,7 +216,35 @@ std::vector<PrintJobInfo> JobManager::list_jobs(
     }
 
     cupsFreeJobs(count, jobs);
-    return result;
+
+    // CUPS can retain completed jobs for a long time. Device Center and MCP
+    // should surface the useful working set, not an effectively unbounded
+    // historical dump. Job IDs are monotonically increasing in CUPS, so sort
+    // newest first and retain every active job plus the ten newest terminal
+    // jobs. Detailed DocSuite diagnostics remain persisted in JSONL history.
+    std::sort(result.begin(), result.end(), [](const PrintJobInfo& left, const PrintJobInfo& right) {
+        return left.id > right.id;
+    });
+
+    if (!include_completed) {
+        return result;
+    }
+
+    std::vector<PrintJobInfo> visible;
+    visible.reserve(std::min(
+        result.size(),
+        kRecentTerminalJobLimit + result.size()));
+    std::size_t terminal_count = 0;
+    for (auto& candidate : result) {
+        if (terminal(candidate.state)) {
+            if (terminal_count >= kRecentTerminalJobLimit) {
+                continue;
+            }
+            ++terminal_count;
+        }
+        visible.push_back(std::move(candidate));
+    }
+    return visible;
 }
 
 std::optional<PrintJobInfo> JobManager::job(
