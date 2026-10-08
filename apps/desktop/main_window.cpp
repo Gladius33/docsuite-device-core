@@ -90,14 +90,30 @@ MainWindow::MainWindow(QWidget* parent)
     service_timer_->start();
     refresh_service_status();
 
+    // Full CUPS/SANE discovery is intentionally infrequent and only runs while
+    // Devices is visible. It catches a newly announced printer/scanner without
+    // keeping SANE/Avahi busy continuously.
     discovery_timer_ = new QTimer(this);
-    discovery_timer_->setInterval(15000);
+    discovery_timer_->setInterval(30000);
     connect(discovery_timer_, &QTimer::timeout, this, [this]() {
         if (tabs_->currentIndex() == 0 && devices_page_ != nullptr) {
             devices_page_->refresh();
         }
     });
     discovery_timer_->start();
+
+    // Physical printer status is much cheaper than full discovery. Poll the
+    // selected printer separately so OFF -> ON transitions become visible fast.
+    // DevicesPage serializes these requests, so a slow/offline device cannot
+    // accumulate background workers.
+    status_timer_ = new QTimer(this);
+    status_timer_->setInterval(10000);
+    connect(status_timer_, &QTimer::timeout, this, [this]() {
+        if (tabs_->currentIndex() == 0 && devices_page_ != nullptr) {
+            devices_page_->refresh_selected_details();
+        }
+    });
+    status_timer_->start();
 }
 
 MainWindow::~MainWindow() {
@@ -106,6 +122,9 @@ MainWindow::~MainWindow() {
     }
     if (discovery_timer_ != nullptr) {
         discovery_timer_->stop();
+    }
+    if (status_timer_ != nullptr) {
+        status_timer_->stop();
     }
 
     QSettings settings;
@@ -146,6 +165,7 @@ void MainWindow::ensure_tab_loaded(const int index) {
 void MainWindow::refresh_active_tab(const int index) {
     if (index == 0 && devices_page_ != nullptr) {
         devices_page_->refresh();
+        devices_page_->refresh_selected_details();
         return;
     }
 
