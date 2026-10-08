@@ -36,6 +36,7 @@ private:
     QLabel* service_status_{nullptr};
     QTimer* service_timer_{nullptr};
     QTimer* discovery_timer_{nullptr};
+    QTimer* status_timer_{nullptr};
     std::array<bool, 7> tab_loaded_{{true, false, false, false, false, false, false}};
 };
 
