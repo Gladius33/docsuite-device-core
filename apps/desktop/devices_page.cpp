@@ -140,31 +140,46 @@ DevicesPage::DevicesPage(
     layout->addLayout(toolbar);
     layout->addWidget(splitter, 1);
 
-    connect(refresh_button_, &QPushButton::clicked, this, [this]() { refresh(); });
+    connect(refresh_button_, &QPushButton::clicked, this, [this]() { refresh(true); });
     connect(printers_, &QListWidget::currentItemChanged, this,
         [this](QListWidgetItem* current, QListWidgetItem*) {
             if (current == nullptr) {
+                details_printer_.clear();
                 details_->clear();
                 return;
             }
-            load_printer_details(current->data(Qt::UserRole).toString());
+            const QString printer = current->data(Qt::UserRole).toString();
+            if (printer != details_printer_) {
+                load_printer_details(printer);
+            }
         });
 
-    refresh();
+    refresh(true);
 }
 
-void DevicesPage::refresh() {
+void DevicesPage::refresh(const bool refresh_selected_details) {
+    if (refresh_in_progress_) {
+        return;
+    }
+    refresh_in_progress_ = true;
     refresh_button_->setEnabled(false);
     summary_->setText(QStringLiteral("Discovering devices…"));
 
+    const QString previous_printer = printers_->currentItem() != nullptr
+        ? printers_->currentItem()->data(Qt::UserRole).toString()
+        : QString{};
+
     auto* watcher = new QFutureWatcher<DeviceSnapshot>(this);
     connect(watcher, &QFutureWatcher<DeviceSnapshot>::finished, this,
-        [this, watcher]() {
+        [this, watcher, previous_printer, refresh_selected_details]() {
             try {
                 const auto snapshot = watcher->result();
+
+                printers_->blockSignals(true);
                 printers_->clear();
                 scanners_->clear();
 
+                int restore_row = -1;
                 for (const auto& printer : snapshot.printers) {
                     QString label = QString::fromStdString(printer.name);
                     if (!printer.model.empty()) {
@@ -174,7 +189,11 @@ void DevicesPage::refresh() {
                         label += QStringLiteral(" [default]");
                     }
                     auto* item = new QListWidgetItem(label, printers_);
-                    item->setData(Qt::UserRole, QString::fromStdString(printer.name));
+                    const QString printer_name = QString::fromStdString(printer.name);
+                    item->setData(Qt::UserRole, printer_name);
+                    if (printer_name == previous_printer) {
+                        restore_row = printers_->count() - 1;
+                    }
                 }
 
                 for (const auto& scanner : snapshot.scanners) {
@@ -190,13 +209,30 @@ void DevicesPage::refresh() {
                     QStringLiteral("%1 printer(s), %2 scanner(s)")
                         .arg(snapshot.printers.size())
                         .arg(snapshot.scanners.size()));
-                if (printers_->count() > 0) {
-                    printers_->setCurrentRow(0);
+
+                if (restore_row < 0 && printers_->count() > 0) {
+                    restore_row = 0;
+                }
+                if (restore_row >= 0) {
+                    printers_->setCurrentRow(restore_row);
+                }
+                printers_->blockSignals(false);
+
+                if (restore_row >= 0) {
+                    const QString selected = printers_->item(restore_row)
+                        ->data(Qt::UserRole).toString();
+                    if (refresh_selected_details || selected != details_printer_) {
+                        load_printer_details(selected);
+                    }
+                } else {
+                    details_printer_.clear();
+                    details_->clear();
                 }
             } catch (const std::exception& error) {
                 summary_->setText(
                     QStringLiteral("Discovery error: %1").arg(QString::fromUtf8(error.what())));
             }
+            refresh_in_progress_ = false;
             refresh_button_->setEnabled(true);
             watcher->deleteLater();
         });
@@ -207,6 +243,7 @@ void DevicesPage::load_printer_details(const QString& printer_name) {
     if (printer_name.isEmpty()) {
         return;
     }
+    details_printer_ = printer_name;
     details_->setPlainText(QStringLiteral("Loading physical printer data…"));
 
     auto* watcher = new QFutureWatcher<PrinterDetails>(this);
@@ -220,9 +257,11 @@ void DevicesPage::load_printer_details(const QString& printer_name) {
                     details_->setPlainText(format_details(result));
                 }
             } catch (const std::exception& error) {
-                details_->setPlainText(
-                    QStringLiteral("Printer query error: %1")
-                        .arg(QString::fromUtf8(error.what())));
+                if (details_printer_ == printer_name) {
+                    details_->setPlainText(
+                        QStringLiteral("Printer query error: %1")
+                            .arg(QString::fromUtf8(error.what())));
+                }
             }
             watcher->deleteLater();
         });
