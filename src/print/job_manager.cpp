@@ -20,6 +20,7 @@ namespace docsuite {
 namespace {
 
 constexpr std::size_t kRecentTerminalJobLimit = 10U;
+constexpr auto kRecentTerminalJobAge = std::chrono::hours{24};
 
 [[nodiscard]] PrintJobState from_ipp_state(const ipp_jstate_t state) noexcept {
     switch (state) {
@@ -217,11 +218,9 @@ std::vector<PrintJobInfo> JobManager::list_jobs(
 
     cupsFreeJobs(count, jobs);
 
-    // CUPS can retain completed jobs for a long time. Device Center and MCP
-    // should surface the useful working set, not an effectively unbounded
-    // historical dump. Job IDs are monotonically increasing in CUPS, so sort
-    // newest first and retain every active job plus the ten newest terminal
-    // jobs. Detailed DocSuite diagnostics remain persisted in JSONL history.
+    // CUPS can retain completed jobs for a long time. Surface the useful
+    // working set only: all active jobs plus at most ten terminal jobs from
+    // the last 24 hours. Full DocSuite timing history remains in JSONL.
     std::sort(result.begin(), result.end(), [](const PrintJobInfo& left, const PrintJobInfo& right) {
         return left.id > right.id;
     });
@@ -230,14 +229,18 @@ std::vector<PrintJobInfo> JobManager::list_jobs(
         return result;
     }
 
+    const auto cutoff = std::chrono::system_clock::now() - kRecentTerminalJobAge;
     std::vector<PrintJobInfo> visible;
-    visible.reserve(std::min(
-        result.size(),
-        kRecentTerminalJobLimit + result.size()));
+    visible.reserve(result.size());
     std::size_t terminal_count = 0;
     for (auto& candidate : result) {
         if (terminal(candidate.state)) {
-            if (terminal_count >= kRecentTerminalJobLimit) {
+            const auto terminal_time =
+                candidate.completed_at.time_since_epoch().count() != 0
+                    ? candidate.completed_at
+                    : candidate.created_at;
+            if (terminal_time.time_since_epoch().count() == 0 || terminal_time < cutoff ||
+                terminal_count >= kRecentTerminalJobLimit) {
                 continue;
             }
             ++terminal_count;
