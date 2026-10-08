@@ -41,7 +41,6 @@ public:
     [[nodiscard]] const CupsPrintBackend& print_backend() const noexcept { return print_backend_; }
     [[nodiscard]] const JobManager& job_manager() const noexcept { return job_manager_; }
     [[nodiscard]] ScannerRouteView scan_backend() const noexcept { return ScannerRouteView{*this}; }
-    [[nodiscard]] const SaneScanBackend& sane_backend() const noexcept { return sane_backend_; }
     [[nodiscard]] const EsclScanBackend& escl_backend() const noexcept { return escl_backend_; }
 
 private:
