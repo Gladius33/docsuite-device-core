@@ -21,7 +21,7 @@ public:
     explicit DevicesPage(
         std::shared_ptr<DeviceServiceGateway> gateway,
         QWidget* parent = nullptr);
-    void refresh();
+    void refresh(bool refresh_selected_details = false);
 
 private:
     void load_printer_details(const QString& printer_name);
@@ -32,6 +32,8 @@ private:
     QListWidget* printers_{nullptr};
     QListWidget* scanners_{nullptr};
     QTextEdit* details_{nullptr};
+    bool refresh_in_progress_{false};
+    QString details_printer_{};
 };
 
 } // namespace docsuite::desktop
